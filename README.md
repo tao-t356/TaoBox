@@ -63,12 +63,11 @@ f
 
 ```text
 1. SSH 登录管理
-2. TaoBox Speed（一体）
-3. VLESS + Hysteria2 节点搭建
-4. Docker + NPM 安装 / 容器管理
-5. 网络工具 / BBR
-6. 系统工具 / DD
-7. 更新工具箱
+2. 多协议节点一键搭建
+3. Docker + NPM 安装 / 容器管理
+4. 网络工具 / BBR
+5. 系统工具 / DD
+6. 更新工具箱
 0. 退出
 ```
 
@@ -94,42 +93,7 @@ f
 2. 新开一个 SSH 会话确认公钥能登录
 3. 再关闭密码登录
 
-### 2. TaoBox Speed（一体）
-
-用于 TCP 加速与节点部署的一体化流程。
-
-包含：
-
-- XanMod / BBRv3 安装尝试
-- 当前系统内核 BBR + `fq` 降级调优
-- TCP sysctl 参数调优
-- DNS / IPv6 / 网络稳定性处理
-- Argo VMess WebSocket 节点部署
-- 重启后续跑
-- 诊断、日志、修复、测速、健康检查
-
-说明：
-
-- 如果 `deb.xanmod.org` 被 Cloudflare challenge 或网络策略拦截，TaoBox Speed 不会直接中断。
-- 默认会自动降级为「当前系统内核 + `tcp_bbr` + `fq` + TCP 调优」，并继续后续节点部署。
-- 如需禁止降级，可设置：
-
-```bash
-SPEED_ALLOW_STOCK_FALLBACK=0 speed --force-all
-```
-
-常用命令：
-
-```bash
-speed
-speed --force-all
-speed --tcp-status
-speed --doctor
-speed --logs kernel
-speed --update-self
-```
-
-### 3. VLESS + Hysteria2 节点搭建
+### 2. 多协议节点一键搭建
 
 该菜单会下载并执行独立项目：
 
@@ -148,9 +112,9 @@ speed --update-self
 
 TaoBox 下载该远程脚本时使用 GitHub API + 时间戳，并携带 `jshook`，避免缓存旧脚本。
 
-### 4. Docker + NPM 安装 / 容器管理
+### 3. Docker + NPM 安装 / 容器管理
 
-第 4 项已整合原来的「Docker 容器管理」。进入后包含：
+第 3 项已整合原来的「Docker 容器管理」。进入后包含：
 
 ```text
 1. 安装 / 重装 Docker + Nginx Proxy Manager
@@ -170,7 +134,7 @@ Nginx Proxy Manager 安装脚本来自：
 
 同样通过 GitHub API + 时间戳拉取，避免 raw 缓存。
 
-### 5. 网络工具 / BBR
+### 4. 网络工具 / BBR
 
 包含：
 
@@ -181,7 +145,7 @@ Nginx Proxy Manager 安装脚本来自：
 - Traceroute / Tracepath
 - 查看本机路由
 
-### 6. 系统工具 / DD
+### 5. 系统工具 / DD
 
 包含：
 
@@ -202,7 +166,7 @@ DD 重装入口当前提供：
 
 > DD 重装属于危险操作，请确认服务商支持、备份数据并确保你知道 root 密码。
 
-### 7. 更新工具箱
+### 6. 更新工具箱
 
 会重新下载 `bootstrap-vps.sh` 并覆盖本地 `~/ssh-key-menu.sh`。当前更新逻辑也使用 GitHub API + 时间戳，避免缓存旧版本。
 

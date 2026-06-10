@@ -1529,12 +1529,11 @@ print_toolbox_menu() {
   say "  公钥条数 : $(count_authorized_keys)"
   print_divider
   menu_item "1" "SSH 登录管理"
-  menu_item "2" "TaoBox Speed（一体）"
-  menu_item "3" "VLESS + Hysteria2 节点搭建"
-  menu_item "4" "Docker + NPM 安装 / 容器管理"
-  menu_item "5" "网络工具 / BBR"
-  menu_item "6" "系统工具 / DD"
-  menu_item "7" "更新工具箱"
+  menu_item "2" "多协议节点一键搭建"
+  menu_item "3" "Docker + NPM 安装 / 容器管理"
+  menu_item "4" "网络工具 / BBR"
+  menu_item "5" "系统工具 / DD"
+  menu_item "6" "更新工具箱"
   menu_exit_item
   print_divider
 }
@@ -1733,12 +1732,11 @@ main_loop() {
     printf '\n'
     case "${choice}" in
       1) ssh_menu_loop ;;
-      2) option_run_taobox_speed ;;
-      3) option_run_vless_project ;;
-      4) docker_npm_menu_loop ;;
-      5) network_menu_loop ;;
-      6) system_tools_menu_loop ;;
-      7) option_update_toolbox ;;
+      2) option_run_vless_project ;;
+      3) docker_npm_menu_loop ;;
+      4) network_menu_loop ;;
+      5) system_tools_menu_loop ;;
+      6) option_update_toolbox ;;
       0) exit 0 ;;
       *) warn "无效选项，请重新输入。"; pause ;;
     esac
