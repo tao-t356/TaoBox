@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.10"
+TOOLBOX_VERSION="0.12.11"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -1061,6 +1061,11 @@ SERVICE_NAME="komari"
 BINARY_PATH="${INSTALL_DIR}/komari"
 LISTEN_HOST="127.0.0.1"
 LISTEN_PORT="25774"
+KOMARI_ADMIN_USERNAME="facker668"
+KOMARI_ADMIN_PASSWORD="wohenshuai"
+KOMARI_INTERNAL_HTTPS_PORT="8444"
+SINGBOX_REALITY_LOCAL_PORT="10443"
+SINGBOX_CONFIG="/etc/sing-box/config.json"
 ACCESS_URL="http://${KOMARI_DOMAIN}"
 INITIAL_PASSWORD=""
 APT_UPDATED=0
@@ -1135,7 +1140,7 @@ cleanup_legacy_docker_komari() {
 
 install_dependencies() {
   apt_update_once
-  apt-get install -y ca-certificates curl nginx
+  apt-get install -y ca-certificates curl nginx python3
 }
 
 install_komari_binary() {
@@ -1194,6 +1199,252 @@ SERVICEEOF
   INITIAL_PASSWORD="$(journalctl -u "${SERVICE_NAME}" --since "2 minutes ago" 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//' || true)"
 }
 
+set_komari_admin_credentials() {
+  if [ -z "${KOMARI_ADMIN_PASSWORD}" ]; then
+    return 0
+  fi
+
+  if (cd "${DATA_DIR}" && "${BINARY_PATH}" chpasswd -p "${KOMARI_ADMIN_PASSWORD}"); then
+    INITIAL_PASSWORD="Username: admin , Password: ${KOMARI_ADMIN_PASSWORD}"
+  else
+    log_warn "Komari 管理员密码设置失败，保留官方初始密码。"
+    return 0
+  fi
+
+  if have_cmd python3; then
+    if python3 - "${DATA_DIR}/data/komari.db" "${KOMARI_ADMIN_USERNAME}" <<'PY'
+import sqlite3
+import sys
+
+db_path, username = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db_path)
+try:
+    cur = con.cursor()
+    cur.execute("SELECT uuid, username FROM users ORDER BY created_at ASC LIMIT 1")
+    row = cur.fetchone()
+    if row and row[1] != username:
+        cur.execute("UPDATE users SET username = ?, updated_at = datetime('now') WHERE uuid = ?", (username, row[0]))
+        con.commit()
+finally:
+    con.close()
+PY
+    then
+      INITIAL_PASSWORD="Username: ${KOMARI_ADMIN_USERNAME} , Password: ${KOMARI_ADMIN_PASSWORD}"
+    else
+      log_warn "Komari 管理员用户名设置失败，用户名保持 admin。"
+    fi
+  fi
+
+  (cd "${DATA_DIR}" && "${BINARY_PATH}" permit-login) >/dev/null 2>&1 || true
+  systemctl restart "${SERVICE_NAME}.service"
+}
+
+ensure_komari_origin_cert() {
+  local cert_dir="/etc/ssl/taobox-komari"
+  local safe_domain=""
+
+  safe_domain="$(safe_domain_name)"
+  KOMARI_ORIGIN_CERT="${cert_dir}/${safe_domain}.crt"
+  KOMARI_ORIGIN_KEY="${cert_dir}/${safe_domain}.key"
+
+  if [ -s "${KOMARI_ORIGIN_CERT}" ] && [ -s "${KOMARI_ORIGIN_KEY}" ]; then
+    return 0
+  fi
+
+  apt-get install -y openssl >/dev/null 2>&1 || true
+  if ! have_cmd openssl; then
+    log_err "缺少 openssl，无法为 Komari 生成 Nginx 内部 HTTPS 证书。"
+    exit 1
+  fi
+
+  mkdir -p "${cert_dir}"
+  openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+    -keyout "${KOMARI_ORIGIN_KEY}" \
+    -out "${KOMARI_ORIGIN_CERT}" \
+    -subj "/CN=${KOMARI_DOMAIN}" \
+    -addext "subjectAltName=DNS:${KOMARI_DOMAIN}" >/dev/null 2>&1
+  chmod 600 "${KOMARI_ORIGIN_KEY}"
+}
+
+install_nginx_stream_module() {
+  if nginx -V 2>&1 | grep -q -- '--with-stream=dynamic'; then
+    if [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
+      apt_update_once
+      apt-get install -y libnginx-mod-stream
+    fi
+
+    if [ -f /usr/lib/nginx/modules/ngx_stream_module.so ] && \
+      ! grep -Rqs 'ngx_stream_module.so' /etc/nginx/modules-enabled 2>/dev/null; then
+      mkdir -p /etc/nginx/modules-enabled
+      printf '%s\n' 'load_module modules/ngx_stream_module.so;' > /etc/nginx/modules-enabled/50-mod-stream.conf
+    fi
+  fi
+}
+
+ensure_nginx_stream_include() {
+  local include_line="include /etc/nginx/stream.d/*.conf;"
+
+  mkdir -p /etc/nginx/stream.d
+  if grep -Fq "${include_line}" /etc/nginx/nginx.conf; then
+    return 0
+  fi
+
+  cp /etc/nginx/nginx.conf "/etc/nginx/nginx.conf.taobox-komari-backup.$(date +%Y%m%d_%H%M%S)" || true
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/etc/nginx/nginx.conf")
+text = path.read_text()
+include_line = "include /etc/nginx/stream.d/*.conf;"
+if include_line not in text:
+    marker = "\nhttp {"
+    if marker in text:
+        text = text.replace(marker, "\n" + include_line + "\n\nhttp {", 1)
+    else:
+        text = text.rstrip() + "\n" + include_line + "\n"
+    path.write_text(text)
+PY
+}
+
+move_singbox_reality_to_local() {
+  if [ ! -f "${SINGBOX_CONFIG}" ] || ! have_cmd sing-box; then
+    log_err "检测到 443 被 sing-box 占用，但未找到 sing-box 配置或命令，无法自动共用 443。"
+    exit 1
+  fi
+
+  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && ! port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box; then
+    log_err "本机 ${SINGBOX_REALITY_LOCAL_PORT} 已被占用，无法迁移 sing-box REALITY。"
+    ss -ltnp "( sport = :${SINGBOX_REALITY_LOCAL_PORT} )" 2>/dev/null || true
+    exit 1
+  fi
+
+  cp "${SINGBOX_CONFIG}" "${SINGBOX_CONFIG}.taobox-komari-backup.$(date +%Y%m%d_%H%M%S)" || true
+  python3 - "${SINGBOX_CONFIG}" "${SINGBOX_REALITY_LOCAL_PORT}" <<'PY'
+import json
+import sys
+
+path, local_port = sys.argv[1], int(sys.argv[2])
+with open(path, "r", encoding="utf-8") as fh:
+    cfg = json.load(fh)
+
+changed = False
+found = False
+for inbound in cfg.get("inbounds", []):
+    tls = inbound.get("tls") or {}
+    reality = tls.get("reality") or {}
+    if inbound.get("type") == "vless" and inbound.get("listen_port") == 443 and reality.get("enabled"):
+        inbound["listen"] = "127.0.0.1"
+        inbound["listen_port"] = local_port
+        changed = True
+        found = True
+    elif inbound.get("type") == "vless" and inbound.get("listen_port") == local_port and reality.get("enabled"):
+        found = True
+
+if not found:
+    raise SystemExit("未找到 listen_port=443 的 sing-box REALITY vless 入站")
+
+if changed:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+PY
+
+  sing-box check -c "${SINGBOX_CONFIG}"
+}
+
+append_komari_internal_https_server() {
+  local conf_file="$1"
+
+  ensure_komari_origin_cert
+  if grep -q "listen 127.0.0.1:${KOMARI_INTERNAL_HTTPS_PORT} ssl" "${conf_file}"; then
+    return 0
+  fi
+
+  if port_in_use "${KOMARI_INTERNAL_HTTPS_PORT}" && ! port_owned_by "${KOMARI_INTERNAL_HTTPS_PORT}" nginx; then
+    log_err "本机 ${KOMARI_INTERNAL_HTTPS_PORT} 已被非 Nginx 服务占用，无法创建 Komari 内部 HTTPS 反代。"
+    ss -ltnp "( sport = :${KOMARI_INTERNAL_HTTPS_PORT} )" 2>/dev/null || true
+    exit 1
+  fi
+
+  cat >> "${conf_file}" <<NGINXEOF
+
+server {
+    listen 127.0.0.1:${KOMARI_INTERNAL_HTTPS_PORT} ssl http2;
+    server_name ${KOMARI_DOMAIN};
+
+    ssl_certificate     ${KOMARI_ORIGIN_CERT};
+    ssl_certificate_key ${KOMARI_ORIGIN_KEY};
+
+    location / {
+        proxy_pass http://${LISTEN_HOST}:${LISTEN_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINXEOF
+}
+
+configure_singbox_nginx_stream_share() {
+  local conf_file="$1"
+
+  log "检测到 443 被 sing-box 占用，自动配置 Nginx stream SNI 分流。"
+  install_nginx_stream_module
+  append_komari_internal_https_server "${conf_file}"
+  ensure_nginx_stream_include
+  move_singbox_reality_to_local
+
+  cat > /etc/nginx/stream.d/00-taobox-sni-router.conf <<NGINXEOF
+stream {
+    map \$ssl_preread_server_name \$taobox_sni_backend {
+        ${KOMARI_DOMAIN} taobox_komari_https;
+        default taobox_singbox_reality;
+    }
+
+    upstream taobox_singbox_reality {
+        server 127.0.0.1:${SINGBOX_REALITY_LOCAL_PORT};
+    }
+
+    upstream taobox_komari_https {
+        server 127.0.0.1:${KOMARI_INTERNAL_HTTPS_PORT};
+    }
+
+    server {
+        listen 443;
+        listen [::]:443;
+        proxy_pass \$taobox_sni_backend;
+        ssl_preread on;
+    }
+}
+NGINXEOF
+
+  nginx -t
+  systemctl restart sing-box
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl restart nginx
+  ACCESS_URL="https://${KOMARI_DOMAIN}"
+  open_firewall_port 443 tcp
+}
+
+should_use_singbox_stream_share() {
+  if port_in_use 443 && port_owned_by 443 sing-box; then
+    return 0
+  fi
+
+  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box && \
+    [ -f /etc/nginx/stream.d/00-taobox-sni-router.conf ]; then
+    return 0
+  fi
+
+  return 1
+}
+
 write_nginx_proxy() {
   local safe_domain=""
   local conf_file=""
@@ -1204,8 +1455,8 @@ write_nginx_proxy() {
     exit 1
   fi
 
-  if port_in_use 443 && ! port_owned_by 443 nginx; then
-    log_warn "端口 443 已被非 Nginx 服务占用，本次只写入 Nginx HTTP 反代。"
+  if port_in_use 443 && ! port_owned_by 443 nginx && ! port_owned_by 443 sing-box; then
+    log_warn "端口 443 已被非 Nginx/sing-box 服务占用，本次只写入 Nginx HTTP 反代。"
     ss -ltnp "( sport = :443 )" 2>/dev/null || true
   fi
 
@@ -1233,6 +1484,12 @@ server {
     }
 }
 NGINXEOF
+
+  if should_use_singbox_stream_share; then
+    configure_singbox_nginx_stream_share "${conf_file}"
+    open_firewall_port 80 tcp
+    return 0
+  fi
 
   if ! nginx -t; then
     rm -f "${conf_file}"
@@ -1364,6 +1621,7 @@ install_dependencies
 cleanup_legacy_docker_komari
 install_komari_binary
 write_komari_service
+set_komari_admin_credentials
 write_nginx_proxy
 install_update_timer
 write_result_file
