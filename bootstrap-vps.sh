@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.5"
+TOOLBOX_VERSION="0.12.7"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -1119,6 +1119,331 @@ option_docker_prune() {
   esac
 }
 
+option_install_komari_server() {
+  local root_cmd=""
+  local tmp_script=""
+  local komari_domain=""
+  local admin_user="facker668"
+  local admin_pass="wohenshuai"
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能安装 Komari。"
+    return 1
+  fi
+
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu) ;;
+      *)
+        err "Komari 一键安装当前只支持 Debian / Ubuntu。"
+        return 1
+        ;;
+    esac
+  else
+    err "无法识别系统版本，已取消。"
+    return 1
+  fi
+
+  prompt_read -p "请输入 Komari 域名: " komari_domain
+  komari_domain="$(printf '%s' "${komari_domain}" | sed -E 's#^https?://##; s#/.*$##; s/[[:space:]]//g')"
+  komari_domain="${komari_domain%.}"
+
+  if ! printf '%s' "${komari_domain}" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'; then
+    err "域名格式无效。示例: monitor.example.com"
+    return 1
+  fi
+
+  say "即将安装 Komari 服务器监控："
+  say "- 访问地址: https://${komari_domain}"
+  say "- 初始账号: ${admin_user}"
+  say "- 初始密码: ${admin_pass}"
+  say "- 安装目录: /opt/komari"
+  warn "请确认域名已解析到本机，且 80/443 端口未被其它服务占用。"
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+KOMARI_DOMAIN="${1:?missing domain}"
+KOMARI_ADMIN_USERNAME="${2:?missing admin username}"
+KOMARI_ADMIN_PASSWORD="${3:?missing admin password}"
+KOMARI_HOME="/opt/komari"
+KOMARI_NETWORK="komari-net"
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+log_err() { printf '错误: %s\n' "$*" >&2; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+if [ -r /etc/os-release ]; then
+  . /etc/os-release
+  case "${ID:-}" in
+    debian|ubuntu) ;;
+    *)
+      log_err "当前系统不是 Debian / Ubuntu。"
+      exit 1
+      ;;
+  esac
+else
+  log_err "无法识别系统版本。"
+  exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+ensure_docker_ready() {
+  if ! have_cmd docker; then
+    log "未检测到 Docker，正在安装 docker.io..."
+    apt-get update
+    apt-get install -y ca-certificates curl gnupg docker.io
+  fi
+
+  if have_cmd systemctl; then
+    systemctl enable --now docker
+  elif have_cmd service; then
+    service docker start || true
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    log_err "Docker 未运行或当前环境无法访问 Docker。"
+    exit 1
+  fi
+}
+
+open_firewall_ports() {
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow 80/tcp >/dev/null 2>&1 || true
+    ufw allow 443/tcp >/dev/null 2>&1 || true
+  fi
+
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --add-service=http --permanent >/dev/null 2>&1 || true
+    firewall-cmd --add-service=https --permanent >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+check_required_ports() {
+  local port=""
+  if ! have_cmd ss; then
+    return 0
+  fi
+
+  for port in 80 443; do
+    if ss -H -ltn "( sport = :${port} )" 2>/dev/null | grep -q .; then
+      log_err "端口 ${port} 已被占用，Caddy 无法自动申请证书并反代 Komari。"
+      log_err "请停止占用 80/443 的服务后重试。"
+      exit 1
+    fi
+  done
+}
+
+print_dns_hint() {
+  local server_ip=""
+  local domain_ip=""
+
+  server_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if have_cmd getent; then
+    domain_ip="$(getent ahostsv4 "${KOMARI_DOMAIN}" 2>/dev/null | awk '{print $1; exit}' || true)"
+  fi
+
+  if [ -n "${server_ip}" ] && [ -n "${domain_ip}" ] && [ "${server_ip}" != "${domain_ip}" ]; then
+    log_warn "域名当前解析到 ${domain_ip}，本机主 IP 是 ${server_ip}。如使用 CDN 可忽略。"
+  fi
+}
+
+install_komari_update_timer() {
+  if ! have_cmd systemctl; then
+    log_warn "未检测到 systemd，已跳过每周自动升级定时器。"
+    return 0
+  fi
+
+  if [ ! -d /run/systemd/system ]; then
+    log_warn "systemd 当前未运行，已跳过每周自动升级定时器。"
+    return 0
+  fi
+
+  cat > /usr/local/sbin/taobox-komari-update <<'UPDATEEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="ghcr.io/komari-monitor/komari:latest"
+CONTAINER="komari"
+NETWORK="komari-net"
+DATA_DIR="/opt/komari/data"
+
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+if ! command -v docker >/dev/null 2>&1; then
+  log "Docker 未安装，跳过 Komari 更新。"
+  exit 0
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  log "Docker 未运行，跳过 Komari 更新。"
+  exit 0
+fi
+
+mkdir -p "${DATA_DIR}"
+
+old_image="$(docker inspect -f '{{.Image}}' "${CONTAINER}" 2>/dev/null || true)"
+if ! docker pull "${IMAGE}"; then
+  log "拉取 Komari 最新镜像失败，保留当前容器。"
+  exit 0
+fi
+
+new_image="$(docker image inspect -f '{{.Id}}' "${IMAGE}" 2>/dev/null || true)"
+if [ -z "${new_image}" ]; then
+  log "无法读取 Komari 镜像 ID，跳过更新。"
+  exit 0
+fi
+
+if [ -n "${old_image}" ] && [ "${old_image}" = "${new_image}" ] && \
+  docker ps --filter "name=^/${CONTAINER}$" --filter "status=running" --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
+  log "Komari 已是最新版本。"
+  exit 0
+fi
+
+backup_container=""
+if docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+  backup_container="${CONTAINER}-backup-$(date +%s)"
+  docker stop "${CONTAINER}" >/dev/null 2>&1 || true
+  docker rename "${CONTAINER}" "${backup_container}"
+fi
+
+docker network create "${NETWORK}" >/dev/null 2>&1 || true
+
+if docker run -d \
+  --name "${CONTAINER}" \
+  --restart unless-stopped \
+  --network "${NETWORK}" \
+  -v "${DATA_DIR}:/app/data" \
+  "${IMAGE}" >/dev/null; then
+  [ -n "${backup_container}" ] && docker rm -f "${backup_container}" >/dev/null 2>&1 || true
+  log "Komari 已更新并重启。"
+  exit 0
+fi
+
+log "新 Komari 容器启动失败，尝试恢复旧容器。"
+docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+if [ -n "${backup_container}" ] && docker inspect "${backup_container}" >/dev/null 2>&1; then
+  docker rename "${backup_container}" "${CONTAINER}"
+  docker start "${CONTAINER}" >/dev/null 2>&1 || true
+fi
+exit 1
+UPDATEEOF
+
+  chmod +x /usr/local/sbin/taobox-komari-update
+
+  cat > /etc/systemd/system/taobox-komari-update.service <<'SERVICEEOF'
+[Unit]
+Description=TaoBox Komari image update
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/taobox-komari-update
+SERVICEEOF
+
+  cat > /etc/systemd/system/taobox-komari-update.timer <<'TIMEREOF'
+[Unit]
+Description=Run TaoBox Komari update weekly
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+  if ! systemctl daemon-reload; then
+    log_warn "systemd daemon-reload 失败，已跳过每周自动升级定时器。"
+    return 0
+  fi
+
+  if ! systemctl enable --now taobox-komari-update.timer; then
+    log_warn "启用 Komari 每周自动升级定时器失败，请稍后手动检查。"
+  fi
+}
+
+ensure_docker_ready
+
+mkdir -p "${KOMARI_HOME}/data" "${KOMARI_HOME}/caddy_data" "${KOMARI_HOME}/caddy_config"
+if [ -n "$(find "${KOMARI_HOME}/data" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+  log_warn "检测到已有 Komari 数据，初始账号密码只会在首次初始化时生效。"
+fi
+
+cat > "${KOMARI_HOME}/Caddyfile" <<CADDYEOF
+${KOMARI_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy komari:25774
+}
+CADDYEOF
+
+docker pull ghcr.io/komari-monitor/komari:latest
+docker pull caddy:2
+
+docker rm -f komari-caddy >/dev/null 2>&1 || true
+check_required_ports
+open_firewall_ports
+print_dns_hint
+
+docker rm -f komari >/dev/null 2>&1 || true
+docker network create "${KOMARI_NETWORK}" >/dev/null 2>&1 || true
+
+docker run -d \
+  --name komari \
+  --restart unless-stopped \
+  --network "${KOMARI_NETWORK}" \
+  -e ADMIN_USERNAME="${KOMARI_ADMIN_USERNAME}" \
+  -e ADMIN_PASSWORD="${KOMARI_ADMIN_PASSWORD}" \
+  -v "${KOMARI_HOME}/data:/app/data" \
+  ghcr.io/komari-monitor/komari:latest
+
+docker run -d \
+  --name komari-caddy \
+  --restart unless-stopped \
+  --network "${KOMARI_NETWORK}" \
+  -p 80:80 \
+  -p 443:443 \
+  -p 443:443/udp \
+  -v "${KOMARI_HOME}/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  -v "${KOMARI_HOME}/caddy_data:/data" \
+  -v "${KOMARI_HOME}/caddy_config:/config" \
+  caddy:2
+
+install_komari_update_timer
+
+log "Komari 容器状态："
+docker ps --filter "name=komari" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" "${komari_domain}" "${admin_user}" "${admin_pass}" || rc=$?
+  else
+    bash "${tmp_script}" "${komari_domain}" "${admin_user}" "${admin_pass}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+
+  if [ "${rc}" -ne 0 ]; then
+    err "Komari 安装失败。"
+    return "${rc}"
+  fi
+
+  ok "Komari 安装完成。"
+  say "访问地址: https://${komari_domain}"
+  say "初始账号: ${admin_user}"
+  say "初始密码: ${admin_pass}"
+  say "管理目录: /opt/komari"
+  say "每周自动升级: systemctl list-timers taobox-komari-update.timer"
+  say "查看日志: docker logs -f komari 或 docker logs -f komari-caddy"
+}
+
 detect_firewall_backend() {
   if have_cmd ufw; then
     printf 'ufw'
@@ -1795,7 +2120,8 @@ system_tools_menu_loop() {
     menu_item "4" "重启 SSH 服务"
     menu_item "5" "查看最近登录"
     menu_item "6" "重启服务器"
-    menu_item "7" "DD 重装系统（危险）"
+    menu_item "7" "安装 Komari 服务器监控"
+    menu_item "8" "DD 重装系统（危险）"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -1807,7 +2133,8 @@ system_tools_menu_loop() {
       4) option_restart_ssh_service ;;
       5) option_recent_logins ;;
       6) option_reboot_server ;;
-      7) dd_reinstall_menu_loop ;;
+      7) option_install_komari_server ;;
+      8) dd_reinstall_menu_loop ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
