@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.18"
+TOOLBOX_VERSION="0.12.19"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -2002,15 +2002,17 @@ EOF
   fi
   rm -f "${result_file}"
 
+  print_divider
   ok "Komari 安装完成。"
-  say "访问地址: ${komari_access_url:-http://${komari_domain}}"
+  printf '%s访问地址:%s %s%s%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${komari_access_url:-http://${komari_domain}}" "${C_RESET}"
   if [ -n "${komari_initial_password}" ]; then
-    say "初始登录信息（仅显示一次）: ${komari_initial_password}"
+    printf '%s初始登录信息（仅显示一次）:%s %s%s%s\n' "${C_BOLD}" "${C_RESET}" "${C_YELLOW}" "${komari_initial_password}" "${C_RESET}"
   else
     warn "未获取到初始密码；如果是重装并保留数据，这是正常的。可查看: journalctl -u komari -n 80"
   fi
-  say "服务管理: systemctl status komari"
-  say "每周自动升级: systemctl list-timers taobox-komari-update.timer"
+  printf '%s服务管理:%s %ssystemctl status komari%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
+  printf '%s每周自动升级:%s %ssystemctl list-timers taobox-komari-update.timer%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
+  print_divider
 }
 
 detect_firewall_backend() {
