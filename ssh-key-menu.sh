@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.11"
+TOOLBOX_VERSION="0.12.12"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -1005,6 +1005,523 @@ option_docker_prune() {
   esac
 }
 
+normalize_domain_input() {
+  local domain="$1"
+  domain="$(printf '%s' "${domain}" | sed -E 's#^https?://##; s#/.*$##; s/[[:space:]]//g')"
+  domain="${domain%.}"
+  printf '%s' "${domain}"
+}
+
+is_valid_domain() {
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
+}
+
+is_valid_port() {
+  local port="$1"
+  case "${port}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${port}" -ge 1 ] 2>/dev/null && [ "${port}" -le 65535 ] 2>/dev/null
+}
+
+sanitize_slug() {
+  local slug="$1"
+  slug="$(printf '%s' "${slug}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_.-' '-')"
+  slug="$(printf '%s' "${slug}" | sed -E 's/^-+//; s/-+$//; s/-+/-/g')"
+  printf '%s' "${slug:-app}"
+}
+
+run_web_gateway_register_proxy() {
+  local app_slug="$1"
+  local app_name="$2"
+  local domain="$3"
+  local upstream_host="$4"
+  local upstream_port="$5"
+  local result_file="${6:-}"
+  local root_cmd=""
+  local tmp_script=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能配置 Web 网关。"
+    return 1
+  fi
+
+  app_slug="$(sanitize_slug "${app_slug}")"
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+WEB_APP_SLUG="${1:?missing app slug}"
+WEB_APP_NAME="${2:?missing app name}"
+WEB_DOMAIN="${3:?missing domain}"
+WEB_UPSTREAM_HOST="${4:?missing upstream host}"
+WEB_UPSTREAM_PORT="${5:?missing upstream port}"
+WEB_RESULT_FILE="${6:-}"
+WEB_INTERNAL_HTTPS_PORT="8444"
+SINGBOX_REALITY_LOCAL_PORT="10443"
+SINGBOX_CONFIG="/etc/sing-box/config.json"
+ACCESS_URL="http://${WEB_DOMAIN}"
+APT_UPDATED=0
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+log_err() { printf '错误: %s\n' "$*" >&2; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+apt_update_once() {
+  if [ "${APT_UPDATED}" -eq 0 ]; then
+    apt-get update
+    APT_UPDATED=1
+  fi
+}
+
+port_in_use() {
+  local port="$1"
+  if ! have_cmd ss; then
+    return 1
+  fi
+  ss -H -ltn "( sport = :${port} )" 2>/dev/null | grep -q .
+}
+
+port_owned_by() {
+  local port="$1"
+  local name="$2"
+  if ! have_cmd ss; then
+    return 1
+  fi
+  ss -H -ltnp "( sport = :${port} )" 2>/dev/null | grep -qi "${name}"
+}
+
+open_firewall_port() {
+  local port="$1"
+  local proto="${2:-tcp}"
+
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+  fi
+
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --add-port="${port}/${proto}" --permanent >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+safe_domain_name() {
+  printf '%s' "${WEB_DOMAIN}" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+install_gateway_dependencies() {
+  apt_update_once
+  apt-get install -y ca-certificates curl nginx python3 openssl
+}
+
+ensure_origin_cert() {
+  local cert_dir="/etc/ssl/taobox-web"
+  local safe_domain=""
+
+  safe_domain="$(safe_domain_name)"
+  WEB_ORIGIN_CERT="${cert_dir}/${safe_domain}.crt"
+  WEB_ORIGIN_KEY="${cert_dir}/${safe_domain}.key"
+
+  if [ -s "${WEB_ORIGIN_CERT}" ] && [ -s "${WEB_ORIGIN_KEY}" ]; then
+    return 0
+  fi
+
+  mkdir -p "${cert_dir}"
+  openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+    -keyout "${WEB_ORIGIN_KEY}" \
+    -out "${WEB_ORIGIN_CERT}" \
+    -subj "/CN=${WEB_DOMAIN}" \
+    -addext "subjectAltName=DNS:${WEB_DOMAIN}" >/dev/null 2>&1
+  chmod 600 "${WEB_ORIGIN_KEY}"
+}
+
+install_nginx_stream_module() {
+  if nginx -V 2>&1 | grep -q -- '--with-stream=dynamic'; then
+    if [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
+      apt_update_once
+      apt-get install -y libnginx-mod-stream
+    fi
+
+    if [ -f /usr/lib/nginx/modules/ngx_stream_module.so ] && \
+      ! grep -Rqs 'ngx_stream_module.so' /etc/nginx/modules-enabled 2>/dev/null; then
+      mkdir -p /etc/nginx/modules-enabled
+      printf '%s\n' 'load_module modules/ngx_stream_module.so;' > /etc/nginx/modules-enabled/50-mod-stream.conf
+    fi
+  fi
+}
+
+ensure_nginx_stream_include() {
+  local include_line="include /etc/nginx/stream.d/*.conf;"
+
+  mkdir -p /etc/nginx/stream.d
+  if grep -Fq "${include_line}" /etc/nginx/nginx.conf; then
+    return 0
+  fi
+
+  cp /etc/nginx/nginx.conf "/etc/nginx/nginx.conf.taobox-web-backup.$(date +%Y%m%d_%H%M%S)" || true
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/etc/nginx/nginx.conf")
+text = path.read_text()
+include_line = "include /etc/nginx/stream.d/*.conf;"
+if include_line not in text:
+    marker = "\nhttp {"
+    if marker in text:
+        text = text.replace(marker, "\n" + include_line + "\n\nhttp {", 1)
+    else:
+        text = text.rstrip() + "\n" + include_line + "\n"
+    path.write_text(text)
+PY
+}
+
+move_singbox_reality_to_local() {
+  if [ ! -f "${SINGBOX_CONFIG}" ] || ! have_cmd sing-box; then
+    log_err "检测到 443 被 sing-box 占用，但未找到 sing-box 配置或命令，无法自动共用 443。"
+    exit 1
+  fi
+
+  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && ! port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box; then
+    log_err "本机 ${SINGBOX_REALITY_LOCAL_PORT} 已被占用，无法迁移 sing-box REALITY。"
+    ss -ltnp "( sport = :${SINGBOX_REALITY_LOCAL_PORT} )" 2>/dev/null || true
+    exit 1
+  fi
+
+  cp "${SINGBOX_CONFIG}" "${SINGBOX_CONFIG}.taobox-web-backup.$(date +%Y%m%d_%H%M%S)" || true
+  python3 - "${SINGBOX_CONFIG}" "${SINGBOX_REALITY_LOCAL_PORT}" <<'PY'
+import json
+import sys
+
+path, local_port = sys.argv[1], int(sys.argv[2])
+with open(path, "r", encoding="utf-8") as fh:
+    cfg = json.load(fh)
+
+changed = False
+found = False
+for inbound in cfg.get("inbounds", []):
+    tls = inbound.get("tls") or {}
+    reality = tls.get("reality") or {}
+    if inbound.get("type") == "vless" and inbound.get("listen_port") == 443 and reality.get("enabled"):
+        inbound["listen"] = "127.0.0.1"
+        inbound["listen_port"] = local_port
+        changed = True
+        found = True
+    elif inbound.get("type") == "vless" and inbound.get("listen_port") == local_port and reality.get("enabled"):
+        found = True
+
+if not found:
+    raise SystemExit("未找到 listen_port=443 的 sing-box REALITY vless 入站")
+
+if changed:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+PY
+
+  sing-box check -c "${SINGBOX_CONFIG}"
+}
+
+should_use_singbox_stream_share() {
+  if port_in_use 443 && port_owned_by 443 sing-box; then
+    return 0
+  fi
+
+  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box && \
+    [ -f /etc/nginx/stream.d/00-taobox-sni-router.conf ]; then
+    return 0
+  fi
+
+  return 1
+}
+
+proxy_conf_file() {
+  printf '/etc/nginx/conf.d/00-taobox-web-%s.conf' "$(safe_domain_name)"
+}
+
+write_http_proxy_config() {
+  local conf_file=""
+
+  conf_file="$(proxy_conf_file)"
+  mkdir -p /etc/nginx/conf.d
+
+  cat > "${conf_file}" <<NGINXEOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${WEB_DOMAIN};
+
+    location / {
+        proxy_pass http://${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINXEOF
+}
+
+append_internal_https_server() {
+  local conf_file=""
+
+  conf_file="$(proxy_conf_file)"
+  ensure_origin_cert
+
+  cat >> "${conf_file}" <<NGINXEOF
+
+server {
+    listen 127.0.0.1:${WEB_INTERNAL_HTTPS_PORT} ssl http2;
+    server_name ${WEB_DOMAIN};
+
+    ssl_certificate     ${WEB_ORIGIN_CERT};
+    ssl_certificate_key ${WEB_ORIGIN_KEY};
+
+    location / {
+        proxy_pass http://${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINXEOF
+}
+
+write_stream_router() {
+  local safe_domain=""
+  local map_file=""
+  local migrated_map="/etc/nginx/stream-map.d/00-taobox-migrated.conf"
+
+  safe_domain="$(safe_domain_name)"
+  mkdir -p /etc/nginx/stream.d /etc/nginx/stream-map.d
+
+  if [ -f /etc/nginx/stream.d/00-taobox-sni-router.conf ]; then
+    awk '
+      $1 !~ /^(include|default)$/ && $2 ~ /^taobox_(komari|web)_https;$/ {
+        gsub(/;/, "", $1)
+        print $1 " taobox_web_https;"
+      }
+    ' /etc/nginx/stream.d/00-taobox-sni-router.conf | sort -u > "${migrated_map}.tmp" || true
+    if [ -s "${migrated_map}.tmp" ]; then
+      mv "${migrated_map}.tmp" "${migrated_map}"
+    else
+      rm -f "${migrated_map}.tmp"
+    fi
+  fi
+
+  map_file="/etc/nginx/stream-map.d/00-taobox-web-${safe_domain}.conf"
+  printf '%s %s;\n' "${WEB_DOMAIN}" "taobox_web_https" > "${map_file}"
+
+  cat > /etc/nginx/stream.d/00-taobox-sni-router.conf <<NGINXEOF
+stream {
+    map \$ssl_preread_server_name \$taobox_sni_backend {
+        include /etc/nginx/stream-map.d/*.conf;
+        default taobox_singbox_reality;
+    }
+
+    upstream taobox_singbox_reality {
+        server 127.0.0.1:${SINGBOX_REALITY_LOCAL_PORT};
+    }
+
+    upstream taobox_web_https {
+        server 127.0.0.1:${WEB_INTERNAL_HTTPS_PORT};
+    }
+
+    server {
+        listen 443;
+        listen [::]:443;
+        proxy_pass \$taobox_sni_backend;
+        ssl_preread on;
+    }
+}
+NGINXEOF
+}
+
+configure_stream_share() {
+  log "检测到 443 被 sing-box 占用，启用 Nginx stream SNI 分流。"
+  install_nginx_stream_module
+  ensure_nginx_stream_include
+  move_singbox_reality_to_local
+  append_internal_https_server
+  write_stream_router
+  nginx -t
+  systemctl restart sing-box
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl restart nginx
+  ACCESS_URL="https://${WEB_DOMAIN}"
+  open_firewall_port 443 tcp
+}
+
+configure_direct_nginx() {
+  if ! nginx -t; then
+    log_err "Nginx 配置检测失败。"
+    exit 1
+  fi
+
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  open_firewall_port 80 tcp
+
+  if ! port_in_use 443 || port_owned_by 443 nginx; then
+    apt-get install -y certbot python3-certbot-nginx >/dev/null 2>&1 || true
+    if have_cmd certbot; then
+      if certbot --nginx -d "${WEB_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --redirect; then
+        ACCESS_URL="https://${WEB_DOMAIN}"
+        open_firewall_port 443 tcp
+      else
+        log_warn "证书申请失败，HTTP 反代仍可使用。"
+      fi
+    fi
+  elif port_in_use 443; then
+    log_warn "443 被非 Nginx/sing-box 服务占用，本次只启用 HTTP 反代。"
+    ss -ltnp "( sport = :443 )" 2>/dev/null || true
+  fi
+}
+
+register_proxy() {
+  if port_in_use 80 && ! port_owned_by 80 nginx; then
+    log_err "端口 80 已被非 Nginx 服务占用，无法共用 Nginx。"
+    ss -ltnp "( sport = :80 )" 2>/dev/null || true
+    exit 1
+  fi
+
+  install_gateway_dependencies
+  write_http_proxy_config
+
+  if should_use_singbox_stream_share; then
+    configure_stream_share
+  else
+    configure_direct_nginx
+  fi
+}
+
+write_result_file() {
+  [ -n "${WEB_RESULT_FILE}" ] || return 0
+  printf 'WEB_ACCESS_URL=%q\n' "${ACCESS_URL}" >> "${WEB_RESULT_FILE}"
+}
+
+register_proxy
+write_result_file
+
+log "Web 网关已注册: ${WEB_DOMAIN} -> ${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT}"
+log "访问地址: ${ACCESS_URL}"
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" "${app_slug}" "${app_name}" "${domain}" "${upstream_host}" "${upstream_port}" "${result_file}" || rc=$?
+  else
+    bash "${tmp_script}" "${app_slug}" "${app_name}" "${domain}" "${upstream_host}" "${upstream_port}" "${result_file}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+  return "${rc}"
+}
+
+option_web_gateway_add_proxy() {
+  local app_slug=""
+  local domain=""
+  local upstream_host=""
+  local upstream_port=""
+  local result_file=""
+  local web_access_url=""
+
+  prompt_read -p "项目名称 [app]: " app_slug
+  app_slug="$(sanitize_slug "${app_slug:-app}")"
+
+  prompt_read -p "请输入域名: " domain
+  domain="$(normalize_domain_input "${domain}")"
+  if ! is_valid_domain "${domain}"; then
+    err "域名格式无效。示例: app.example.com"
+    return 1
+  fi
+
+  prompt_read -p "上游地址 [127.0.0.1]: " upstream_host
+  upstream_host="${upstream_host:-127.0.0.1}"
+
+  prompt_read -p "上游端口: " upstream_port
+  if ! is_valid_port "${upstream_port}"; then
+    err "端口无效，应为 1-65535。"
+    return 1
+  fi
+
+  result_file="$(mktemp)"
+  if ! run_web_gateway_register_proxy "${app_slug}" "${app_slug}" "${domain}" "${upstream_host}" "${upstream_port}" "${result_file}"; then
+    rm -f "${result_file}"
+    err "Web 网关注册失败。"
+    return 1
+  fi
+
+  if [ -r "${result_file}" ]; then
+    # shellcheck disable=SC1090
+    . "${result_file}"
+    web_access_url="${WEB_ACCESS_URL:-}"
+  fi
+  rm -f "${result_file}"
+
+  ok "Web 网关注册完成。"
+  say "访问地址: ${web_access_url:-http://${domain}}"
+}
+
+option_web_gateway_status() {
+  local root_cmd=""
+  local tmp_script=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能查看 Web 网关状态。"
+    return 1
+  fi
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -e
+
+section() { printf '\n===== %s =====\n' "$1"; }
+
+section "监听端口"
+ss -ltnp 2>/dev/null | grep -E ':(80|443|8444|10443)\b' || true
+
+section "Nginx 配置检测"
+nginx -t 2>&1 || true
+
+section "TaoBox 反代站点"
+ls -1 /etc/nginx/conf.d/00-taobox-web-*.conf 2>/dev/null || true
+
+section "TaoBox SNI 分流"
+ls -1 /etc/nginx/stream-map.d/*.conf 2>/dev/null || true
+if [ -d /etc/nginx/stream-map.d ]; then
+  grep -RIn . /etc/nginx/stream-map.d 2>/dev/null || true
+fi
+
+section "证书"
+if command -v certbot >/dev/null 2>&1; then
+  certbot certificates 2>&1 || true
+else
+  echo "certbot 未安装"
+fi
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" || rc=$?
+  else
+    bash "${tmp_script}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+  return "${rc}"
+}
+
 option_install_komari_server() {
   local root_cmd=""
   local tmp_script=""
@@ -1034,10 +1551,9 @@ option_install_komari_server() {
   fi
 
   prompt_read -p "请输入 Komari 域名: " komari_domain
-  komari_domain="$(printf '%s' "${komari_domain}" | sed -E 's#^https?://##; s#/.*$##; s/[[:space:]]//g')"
-  komari_domain="${komari_domain%.}"
+  komari_domain="$(normalize_domain_input "${komari_domain}")"
 
-  if ! printf '%s' "${komari_domain}" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'; then
+  if ! is_valid_domain "${komari_domain}"; then
     err "域名格式无效。示例: monitor.example.com"
     return 1
   fi
@@ -1622,7 +2138,6 @@ cleanup_legacy_docker_komari
 install_komari_binary
 write_komari_service
 set_komari_admin_credentials
-write_nginx_proxy
 install_update_timer
 write_result_file
 
@@ -1644,10 +2159,16 @@ EOF
     return "${rc}"
   fi
 
+  if ! run_web_gateway_register_proxy "komari" "Komari" "${komari_domain}" "127.0.0.1" "25774" "${result_file}"; then
+    rm -f "${result_file}"
+    err "Komari 已安装，但 Web 网关反代配置失败。"
+    return 1
+  fi
+
   if [ -r "${result_file}" ]; then
     # shellcheck disable=SC1090
     . "${result_file}"
-    komari_access_url="${KOMARI_ACCESS_URL:-}"
+    komari_access_url="${WEB_ACCESS_URL:-${KOMARI_ACCESS_URL:-}}"
     komari_initial_password="${KOMARI_INITIAL_PASSWORD:-}"
   fi
   rm -f "${result_file}"
@@ -2189,9 +2710,10 @@ print_toolbox_menu() {
   menu_item "1" "SSH 登录管理"
   menu_item "2" "多协议节点一键搭建"
   menu_item "3" "Docker + NPM 安装 / 容器管理"
-  menu_item "4" "网络工具 / BBR"
-  menu_item "5" "系统工具 / DD"
-  menu_item "6" "更新工具箱"
+  menu_item "4" "Web 网关 / 域名反代"
+  menu_item "5" "网络工具 / BBR"
+  menu_item "6" "系统工具 / DD"
+  menu_item "7" "更新工具箱"
   menu_exit_item
   print_divider
 }
@@ -2288,6 +2810,29 @@ firewall_menu_loop() {
       4) option_allow_common_ports ;;
       5) option_allow_custom_port ;;
       6) option_firewall_status ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+web_gateway_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Web 网关 / 域名反代"
+    print_divider
+    menu_item "1" "添加 / 更新反代"
+    menu_item "2" "查看网关状态"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_web_gateway_add_proxy ;;
+      2) option_web_gateway_status ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
@@ -2394,9 +2939,10 @@ main_loop() {
       1) ssh_menu_loop ;;
       2) option_run_vless_project ;;
       3) docker_npm_menu_loop ;;
-      4) network_menu_loop ;;
-      5) system_tools_menu_loop ;;
-      6) option_update_toolbox ;;
+      4) web_gateway_menu_loop ;;
+      5) network_menu_loop ;;
+      6) system_tools_menu_loop ;;
+      7) option_update_toolbox ;;
       0) exit 0 ;;
       *) warn "无效选项，请重新输入。"; pause ;;
     esac

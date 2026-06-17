@@ -1,12 +1,12 @@
 # TaoBox
 
-TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、TCP/BBR 调优、节点部署、Docker + Nginx Proxy Manager、网络诊断、系统工具和自更新能力。
+TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、TCP/BBR 调优、节点部署、Docker + Nginx Proxy Manager、Web 网关 / 域名反代、网络诊断、系统工具和自更新能力。
 
 当前主线更偏向「登录 VPS 后直接用菜单完成常用运维与节点部署」，仓库中仍保留早期的 Ansible / SSH 配置生成文件，适合需要批量管理多台 VPS 的场景。
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.11`
+- TaoBox VPS Toolbox：`v0.12.12`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -65,9 +65,10 @@ f
 1. SSH 登录管理
 2. 多协议节点一键搭建
 3. Docker + NPM 安装 / 容器管理
-4. 网络工具 / BBR
-5. 系统工具 / DD
-6. 更新工具箱
+4. Web 网关 / 域名反代
+5. 网络工具 / BBR
+6. 系统工具 / DD
+7. 更新工具箱
 0. 退出
 ```
 
@@ -134,7 +135,25 @@ Nginx Proxy Manager 安装脚本来自：
 
 同样通过 GitHub API + 时间戳拉取，避免 raw 缓存。
 
-### 4. 网络工具 / BBR
+### 4. Web 网关 / 域名反代
+
+Web 网关是后续应用统一接入域名、证书和反代的公共底座。它可以把任意本机 HTTP 服务注册为：
+
+```text
+域名 -> 127.0.0.1:端口
+```
+
+当前提供：
+
+- 添加 / 更新反代
+- 查看 80 / 443 / 8444 / 10443 监听状态
+- 查看 TaoBox 管理的 Nginx 站点和 SNI 分流映射
+- 443 空闲或已由 Nginx 占用时，自动尝试 certbot 证书
+- 443 被 TaoBox sing-box REALITY 占用时，自动启用 Nginx stream SNI 分流，多项目共用 443
+
+后续新增 Web 项目时，只需要安装项目本体并监听本机端口，再调用 Web 网关注册域名。
+
+### 5. 网络工具 / BBR
 
 包含：
 
@@ -145,7 +164,7 @@ Nginx Proxy Manager 安装脚本来自：
 - Traceroute / Tracepath
 - 查看本机路由
 
-### 5. 系统工具 / DD
+### 6. 系统工具 / DD
 
 包含：
 
@@ -162,9 +181,7 @@ Komari 安装入口会提示输入域名，然后按官方原生方式安装 Kom
 
 - 下载官方 release 二进制到 `/opt/komari/komari`
 - 创建 `komari.service`，监听 `127.0.0.1:25774`
-- 自动写入宿主机 Nginx 反代配置，共用同一个 Nginx
-- 若 443 空闲或已由 Nginx 占用，会尝试通过 `certbot --nginx` 申请 HTTPS 证书
-- 若 443 已被 TaoBox 的 sing-box REALITY 占用，会自动启用 Nginx stream SNI 分流：Komari 域名走 Nginx 内部 HTTPS 反代，其他流量继续转给 sing-box
+- 调用 Web 网关注册域名反代，共用同一个 Nginx / 证书 / SNI 分流底座
 - 会清理旧版 TaoBox 创建的 `komari` / `komari-caddy` Docker 容器，避免继续占用 443
 
 安装时还会创建每周自动检测 / 升级 Komari 原生二进制的 systemd timer。
