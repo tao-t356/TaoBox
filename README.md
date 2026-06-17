@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.8`
+- TaoBox VPS Toolbox：`v0.12.10`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -158,19 +158,17 @@ Nginx Proxy Manager 安装脚本来自：
 - 安装 Komari 服务器监控
 - DD 重装系统入口
 
-Komari 安装入口会提示输入域名，然后自动安装 Docker、部署 Komari，并自动适配反代：
+Komari 安装入口会提示输入域名，然后按官方原生方式安装 Komari：
 
-- 已有 Nginx：自动写入 Nginx 反代，并尝试通过 `certbot --nginx` 申请 HTTPS 证书
-- 已有 Caddy：自动写入 Caddy 站点配置，由 Caddy 自动签发 HTTPS 证书
-- 没有现有 Web 服务且 80/443 空闲：自动启动内置 Caddy 容器
-- 80/443 被其它服务占用且无法识别：自动开放 `25774` 端口直连兜底
+- 下载官方 release 二进制到 `/opt/komari/komari`
+- 创建 `komari.service`，监听 `127.0.0.1:25774`
+- 自动写入宿主机 Nginx 反代配置，共用同一个 Nginx
+- 若 443 空闲或已由 Nginx 占用，会尝试通过 `certbot --nginx` 申请 HTTPS 证书
+- 会清理旧版 TaoBox 创建的 `komari` / `komari-caddy` Docker 容器，避免继续占用 443
 
-安装时还会创建每周自动检测 / 升级 Komari 镜像的 systemd timer。
+安装时还会创建每周自动检测 / 升级 Komari 原生二进制的 systemd timer。
 
-默认初始登录信息：
-
-- 账号：`facker668`
-- 密码：`wohenshuai`
+初始登录信息由 Komari 官方原生程序生成，仅首次初始化时显示一次。
 
 自动升级状态可通过以下命令查看：
 

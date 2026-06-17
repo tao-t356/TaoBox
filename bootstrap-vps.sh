@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.8"
+TOOLBOX_VERSION="0.12.10"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -1124,10 +1124,8 @@ option_install_komari_server() {
   local tmp_script=""
   local result_file=""
   local komari_domain=""
-  local admin_user="facker668"
-  local admin_pass="wohenshuai"
   local komari_access_url=""
-  local komari_proxy_mode=""
+  local komari_initial_password=""
   local rc=0
 
   if ! root_cmd="$(sudo_prefix)"; then
@@ -1140,7 +1138,7 @@ option_install_komari_server() {
     case "${ID:-}" in
       debian|ubuntu) ;;
       *)
-        err "Komari 一键安装当前只支持 Debian / Ubuntu。"
+        err "Komari 原生安装当前只支持 Debian / Ubuntu。"
         return 1
         ;;
     esac
@@ -1159,11 +1157,10 @@ option_install_komari_server() {
   fi
 
   say "即将安装 Komari 服务器监控："
-  say "- 访问地址: https://${komari_domain}"
-  say "- 初始账号: ${admin_user}"
-  say "- 初始密码: ${admin_pass}"
+  say "- 安装方式: 官方原生二进制 + systemd"
+  say "- 监听地址: 127.0.0.1:25774"
+  say "- 反代方式: 共享宿主机 Nginx"
   say "- 安装目录: /opt/komari"
-  warn "请确认域名已解析到本机。脚本会自动适配已有 Nginx / Caddy。"
 
   tmp_script="$(mktemp)"
   result_file="$(mktemp)"
@@ -1171,37 +1168,21 @@ option_install_komari_server() {
 set -euo pipefail
 
 KOMARI_DOMAIN="${1:?missing domain}"
-KOMARI_ADMIN_USERNAME="${2:?missing admin username}"
-KOMARI_ADMIN_PASSWORD="${3:?missing admin password}"
-KOMARI_RESULT_FILE="${4:-}"
-KOMARI_HOME="/opt/komari"
-KOMARI_NETWORK="komari-net"
-KOMARI_HOST_PORT="25774"
-KOMARI_BIND_ADDRESS="127.0.0.1"
-KOMARI_ACCESS_URL="https://${KOMARI_DOMAIN}"
-KOMARI_PROXY_MODE="auto"
+KOMARI_RESULT_FILE="${2:-}"
+INSTALL_DIR="/opt/komari"
+DATA_DIR="/opt/komari"
+SERVICE_NAME="komari"
+BINARY_PATH="${INSTALL_DIR}/komari"
+LISTEN_HOST="127.0.0.1"
+LISTEN_PORT="25774"
+ACCESS_URL="http://${KOMARI_DOMAIN}"
+INITIAL_PASSWORD=""
 APT_UPDATED=0
 
 log() { printf '%s\n' "$*"; }
 log_warn() { printf '警告: %s\n' "$*" >&2; }
 log_err() { printf '错误: %s\n' "$*" >&2; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-if [ -r /etc/os-release ]; then
-  . /etc/os-release
-  case "${ID:-}" in
-    debian|ubuntu) ;;
-    *)
-      log_err "当前系统不是 Debian / Ubuntu。"
-      exit 1
-      ;;
-  esac
-else
-  log_err "无法识别系统版本。"
-  exit 1
-fi
-
-export DEBIAN_FRONTEND=noninteractive
 
 apt_update_once() {
   if [ "${APT_UPDATED}" -eq 0 ]; then
@@ -1210,23 +1191,36 @@ apt_update_once() {
   fi
 }
 
-ensure_docker_ready() {
-  if ! have_cmd docker; then
-    log "未检测到 Docker，正在安装 docker.io..."
-    apt_update_once
-    apt-get install -y ca-certificates curl gnupg docker.io
-  fi
+detect_arch() {
+  local arch=""
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    i386|i686) printf '386' ;;
+    riscv64) printf 'riscv64' ;;
+    *)
+      log_err "不支持的架构: ${arch}"
+      exit 1
+      ;;
+  esac
+}
 
-  if have_cmd systemctl; then
-    systemctl enable --now docker
-  elif have_cmd service; then
-    service docker start || true
+port_in_use() {
+  local port="$1"
+  if ! have_cmd ss; then
+    return 1
   fi
+  ss -H -ltn "( sport = :${port} )" 2>/dev/null | grep -q .
+}
 
-  if ! docker info >/dev/null 2>&1; then
-    log_err "Docker 未运行或当前环境无法访问 Docker。"
-    exit 1
+port_owned_by() {
+  local port="$1"
+  local name="$2"
+  if ! have_cmd ss; then
+    return 1
   fi
+  ss -H -ltnp "( sport = :${port} )" 2>/dev/null | grep -qi "${name}"
 }
 
 open_firewall_port() {
@@ -1243,117 +1237,90 @@ open_firewall_port() {
   fi
 }
 
-open_firewall_web_ports() {
-  open_firewall_port 80 tcp
-  open_firewall_port 443 tcp
-}
-
-port_in_use() {
-  local port="$1"
-  if ! have_cmd ss; then
-    return 1
-  fi
-
-  ss -H -ltn "( sport = :${port} )" 2>/dev/null | grep -q .
-}
-
-port_owned_by() {
-  local port="$1"
-  local name="$2"
-  if ! have_cmd ss; then
-    return 1
-  fi
-
-  ss -H -ltnp "( sport = :${port} )" 2>/dev/null | grep -qi "${name}"
-}
-
-detect_proxy_mode() {
-  if port_owned_by 80 nginx || port_owned_by 443 nginx; then
-    printf 'nginx'
-    return 0
-  fi
-  if port_owned_by 80 caddy || port_owned_by 443 caddy; then
-    printf 'caddy'
-    return 0
-  fi
-  if have_cmd nginx || [ -d /etc/nginx ]; then
-    printf 'nginx'
-    return 0
-  fi
-  if have_cmd caddy || [ -f /etc/caddy/Caddyfile ]; then
-    printf 'caddy'
-    return 0
-  fi
-  if ! port_in_use 80 && ! port_in_use 443; then
-    printf 'docker-caddy'
-    return 0
-  fi
-  printf 'direct'
-}
-
-print_dns_hint() {
-  local server_ip=""
-  local domain_ip=""
-
-  server_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  if have_cmd getent; then
-    domain_ip="$(getent ahostsv4 "${KOMARI_DOMAIN}" 2>/dev/null | awk '{print $1; exit}' || true)"
-  fi
-
-  if [ -n "${server_ip}" ] && [ -n "${domain_ip}" ] && [ "${server_ip}" != "${domain_ip}" ]; then
-    log_warn "域名当前解析到 ${domain_ip}，本机主 IP 是 ${server_ip}。如使用 CDN 可忽略。"
-  fi
-}
-
 safe_domain_name() {
   printf '%s' "${KOMARI_DOMAIN}" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
-write_komari_env() {
-  cat > "${KOMARI_HOME}/taobox.env" <<ENVEOF
-KOMARI_BIND_ADDRESS="${KOMARI_BIND_ADDRESS}"
-KOMARI_HOST_PORT="${KOMARI_HOST_PORT}"
-KOMARI_PROXY_MODE="${KOMARI_PROXY_MODE}"
-KOMARI_DOMAIN="${KOMARI_DOMAIN}"
-ENVEOF
+cleanup_legacy_docker_komari() {
+  if have_cmd docker && docker info >/dev/null 2>&1; then
+    docker rm -f komari-caddy komari >/dev/null 2>&1 || true
+  fi
 }
 
-write_result_file() {
-  [ -n "${KOMARI_RESULT_FILE}" ] || return 0
-  {
-    printf 'KOMARI_ACCESS_URL=%q\n' "${KOMARI_ACCESS_URL}"
-    printf 'KOMARI_PROXY_MODE=%q\n' "${KOMARI_PROXY_MODE}"
-  } > "${KOMARI_RESULT_FILE}"
+install_dependencies() {
+  apt_update_once
+  apt-get install -y ca-certificates curl nginx
 }
 
-start_komari_container() {
-  docker rm -f komari >/dev/null 2>&1 || true
-  docker network create "${KOMARI_NETWORK}" >/dev/null 2>&1 || true
+install_komari_binary() {
+  local arch=""
+  local file_name=""
+  local download_url=""
+  local tmp_binary=""
 
-  if port_in_use "${KOMARI_HOST_PORT}"; then
-    log_err "本机端口 ${KOMARI_HOST_PORT} 已被占用，无法启动 Komari。"
+  arch="$(detect_arch)"
+  file_name="komari-linux-${arch}"
+  download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
+  tmp_binary="$(mktemp)"
+
+  log "下载 Komari 官方原生二进制: ${download_url}"
+  if ! curl -fsSL -o "${tmp_binary}" "${download_url}"; then
+    rm -f "${tmp_binary}"
+    log_err "下载 Komari 二进制失败。"
     exit 1
   fi
 
-  docker run -d \
-    --name komari \
-    --restart unless-stopped \
-    --network "${KOMARI_NETWORK}" \
-    -p "${KOMARI_BIND_ADDRESS}:${KOMARI_HOST_PORT}:25774" \
-    -e ADMIN_USERNAME="${KOMARI_ADMIN_USERNAME}" \
-    -e ADMIN_PASSWORD="${KOMARI_ADMIN_PASSWORD}" \
-    -v "${KOMARI_HOME}/data:/app/data" \
-    ghcr.io/komari-monitor/komari:latest
+  mkdir -p "${INSTALL_DIR}" "${DATA_DIR}"
+  if [ -f "${BINARY_PATH}" ]; then
+    cp "${BINARY_PATH}" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)" || true
+  fi
+
+  install -m 0755 "${tmp_binary}" "${BINARY_PATH}"
+  rm -f "${tmp_binary}"
 }
 
-configure_nginx_proxy() {
+write_komari_service() {
+  cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<SERVICEEOF
+[Unit]
+Description=Komari Monitor Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${BINARY_PATH} server -l ${LISTEN_HOST}:${LISTEN_PORT}
+WorkingDirectory=${DATA_DIR}
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+  systemctl daemon-reload
+  systemctl enable --now "${SERVICE_NAME}.service"
+  sleep 5
+
+  if ! systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+    log_err "Komari 服务启动失败，查看日志: journalctl -u ${SERVICE_NAME} -f"
+    exit 1
+  fi
+
+  INITIAL_PASSWORD="$(journalctl -u "${SERVICE_NAME}" --since "2 minutes ago" 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//' || true)"
+}
+
+write_nginx_proxy() {
   local safe_domain=""
   local conf_file=""
 
-  log "检测到 Nginx，正在自动写入 Komari 反代..."
-  if ! have_cmd nginx; then
-    apt_update_once
-    apt-get install -y nginx
+  if port_in_use 80 && ! port_owned_by 80 nginx; then
+    log_err "端口 80 已被非 Nginx 服务占用，无法共用 Nginx。"
+    ss -ltnp "( sport = :80 )" 2>/dev/null || true
+    exit 1
+  fi
+
+  if port_in_use 443 && ! port_owned_by 443 nginx; then
+    log_warn "端口 443 已被非 Nginx 服务占用，本次只写入 Nginx HTTP 反代。"
+    ss -ltnp "( sport = :443 )" 2>/dev/null || true
   fi
 
   safe_domain="$(safe_domain_name)"
@@ -1367,7 +1334,7 @@ server {
     server_name ${KOMARI_DOMAIN};
 
     location / {
-        proxy_pass http://127.0.0.1:${KOMARI_HOST_PORT};
+        proxy_pass http://${LISTEN_HOST}:${LISTEN_PORT};
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -1382,234 +1349,85 @@ server {
 NGINXEOF
 
   if ! nginx -t; then
-    log_warn "Nginx 配置检测失败，已跳过 Nginx 自动反代。"
     rm -f "${conf_file}"
-    return 1
+    log_err "Nginx 配置检测失败，已回滚 Komari 反代配置。"
+    exit 1
   fi
 
-  if have_cmd systemctl && [ -d /run/systemd/system ]; then
-    systemctl enable --now nginx >/dev/null 2>&1 || true
-    if ! (systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx); then
-      log_warn "Nginx 重载失败，已跳过 Nginx 自动反代。"
-      rm -f "${conf_file}"
-      return 1
-    fi
-  else
-    if ! (service nginx reload >/dev/null 2>&1 || service nginx restart >/dev/null 2>&1); then
-      log_warn "Nginx 重载失败，已跳过 Nginx 自动反代。"
-      rm -f "${conf_file}"
-      return 1
-    fi
-  fi
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  open_firewall_port 80 tcp
 
-  open_firewall_web_ports
-  KOMARI_PROXY_MODE="host-nginx"
-  KOMARI_ACCESS_URL="http://${KOMARI_DOMAIN}"
-
-  if ! have_cmd certbot; then
-    apt-get update >/dev/null 2>&1 || true
+  if ! port_in_use 443 || port_owned_by 443 nginx; then
     apt-get install -y certbot python3-certbot-nginx >/dev/null 2>&1 || true
-  fi
-  if have_cmd certbot; then
-    if certbot --nginx -d "${KOMARI_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --redirect; then
-      KOMARI_ACCESS_URL="https://${KOMARI_DOMAIN}"
-      nginx -t >/dev/null 2>&1 && {
-        if have_cmd systemctl && [ -d /run/systemd/system ]; then
-          systemctl reload nginx >/dev/null 2>&1 || true
-        else
-          service nginx reload >/dev/null 2>&1 || true
-        fi
-      }
-    else
-      log_warn "Nginx 反代已生效，但证书申请失败，暂时使用 HTTP。"
-    fi
-  else
-    log_warn "未安装 certbot，Nginx 反代已生效，暂时使用 HTTP。"
-  fi
-
-  return 0
-}
-
-configure_host_caddy_proxy() {
-  local site_file=""
-  local caddyfile="/etc/caddy/Caddyfile"
-  local import_line="import /etc/caddy/conf.d/*.caddy"
-
-  log "检测到 Caddy，正在自动写入 Komari 反代..."
-  if ! have_cmd caddy; then
-    log_warn "检测到 Caddy 配置但未找到 caddy 命令，已跳过 Caddy 自动反代。"
-    return 1
-  fi
-
-  mkdir -p /etc/caddy/conf.d
-  touch "${caddyfile}"
-  if ! grep -Fqs "${import_line}" "${caddyfile}"; then
-    cp "${caddyfile}" "${caddyfile}.taobox.bak.$(date +%s)" 2>/dev/null || true
-    {
-      printf '\n'
-      printf '%s\n' "${import_line}"
-    } >> "${caddyfile}"
-  fi
-
-  site_file="/etc/caddy/conf.d/taobox-komari-$(safe_domain_name).caddy"
-  cat > "${site_file}" <<CADDYEOF
-${KOMARI_DOMAIN} {
-  encode zstd gzip
-  reverse_proxy 127.0.0.1:${KOMARI_HOST_PORT}
-}
-CADDYEOF
-
-  if ! caddy validate --config "${caddyfile}"; then
-    log_warn "Caddy 配置检测失败，已跳过 Caddy 自动反代。"
-    rm -f "${site_file}"
-    return 1
-  fi
-
-  if have_cmd systemctl && [ -d /run/systemd/system ]; then
-    systemctl enable --now caddy >/dev/null 2>&1 || true
-    if ! (systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy); then
-      log_warn "Caddy 重载失败，已跳过 Caddy 自动反代。"
-      rm -f "${site_file}"
-      return 1
-    fi
-  else
-    if ! (service caddy reload >/dev/null 2>&1 || service caddy restart >/dev/null 2>&1); then
-      log_warn "Caddy 重载失败，已跳过 Caddy 自动反代。"
-      rm -f "${site_file}"
-      return 1
+    if have_cmd certbot; then
+      if certbot --nginx -d "${KOMARI_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --redirect; then
+        ACCESS_URL="https://${KOMARI_DOMAIN}"
+        open_firewall_port 443 tcp
+      else
+        log_warn "证书申请失败，Nginx HTTP 反代仍可使用。"
+      fi
     fi
   fi
-
-  open_firewall_web_ports
-  KOMARI_PROXY_MODE="host-caddy"
-  KOMARI_ACCESS_URL="https://${KOMARI_DOMAIN}"
-  return 0
 }
 
-configure_docker_caddy_proxy() {
-  if port_in_use 80 || port_in_use 443; then
-    return 1
-  fi
-
-  log "未检测到现有 Nginx / Caddy，正在启动内置 Caddy HTTPS 反代..."
-  cat > "${KOMARI_HOME}/Caddyfile" <<CADDYEOF
-${KOMARI_DOMAIN} {
-  encode zstd gzip
-  reverse_proxy komari:25774
-}
-CADDYEOF
-
-  docker pull caddy:2
-  docker rm -f komari-caddy >/dev/null 2>&1 || true
-  docker run -d \
-    --name komari-caddy \
-    --restart unless-stopped \
-    --network "${KOMARI_NETWORK}" \
-    -p 80:80 \
-    -p 443:443 \
-    -p 443:443/udp \
-    -v "${KOMARI_HOME}/Caddyfile:/etc/caddy/Caddyfile:ro" \
-    -v "${KOMARI_HOME}/caddy_data:/data" \
-    -v "${KOMARI_HOME}/caddy_config:/config" \
-    caddy:2
-
-  open_firewall_web_ports
-  KOMARI_PROXY_MODE="docker-caddy"
-  KOMARI_ACCESS_URL="https://${KOMARI_DOMAIN}"
-  return 0
-}
-
-configure_direct_access() {
-  KOMARI_BIND_ADDRESS="0.0.0.0"
-  KOMARI_PROXY_MODE="direct-port"
-  KOMARI_ACCESS_URL="http://${KOMARI_DOMAIN}:${KOMARI_HOST_PORT}"
-  open_firewall_port "${KOMARI_HOST_PORT}" tcp
-}
-
-install_komari_update_timer() {
-  if ! have_cmd systemctl; then
-    log_warn "未检测到 systemd，已跳过每周自动升级定时器。"
-    return 0
-  fi
-
-  if [ ! -d /run/systemd/system ]; then
-    log_warn "systemd 当前未运行，已跳过每周自动升级定时器。"
-    return 0
-  fi
-
+install_update_timer() {
   cat > /usr/local/sbin/taobox-komari-update <<'UPDATEEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="ghcr.io/komari-monitor/komari:latest"
-CONTAINER="komari"
-NETWORK="komari-net"
-DATA_DIR="/opt/komari/data"
-KOMARI_ENV="/opt/komari/taobox.env"
-KOMARI_BIND_ADDRESS="127.0.0.1"
-KOMARI_HOST_PORT="25774"
-
-[ -r "${KOMARI_ENV}" ] && . "${KOMARI_ENV}"
+INSTALL_DIR="/opt/komari"
+BINARY_PATH="${INSTALL_DIR}/komari"
+SERVICE_NAME="komari"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
-if ! command -v docker >/dev/null 2>&1; then
-  log "Docker 未安装，跳过 Komari 更新。"
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    i386|i686) printf '386' ;;
+    riscv64) printf 'riscv64' ;;
+    *) log "不支持的架构: $(uname -m)"; exit 0 ;;
+  esac
+}
+
+if ! command -v curl >/dev/null 2>&1; then
+  log "缺少 curl，跳过 Komari 更新。"
   exit 0
 fi
 
-if ! docker info >/dev/null 2>&1; then
-  log "Docker 未运行，跳过 Komari 更新。"
+arch="$(detect_arch)"
+download_url="https://github.com/komari-monitor/komari/releases/latest/download/komari-linux-${arch}"
+tmp_binary="$(mktemp)"
+
+if ! curl -fsSL -o "${tmp_binary}" "${download_url}"; then
+  rm -f "${tmp_binary}"
+  log "下载 Komari 最新版本失败，保留当前版本。"
   exit 0
 fi
 
-mkdir -p "${DATA_DIR}"
-
-old_image="$(docker inspect -f '{{.Image}}' "${CONTAINER}" 2>/dev/null || true)"
-if ! docker pull "${IMAGE}"; then
-  log "拉取 Komari 最新镜像失败，保留当前容器。"
-  exit 0
-fi
-
-new_image="$(docker image inspect -f '{{.Id}}' "${IMAGE}" 2>/dev/null || true)"
-if [ -z "${new_image}" ]; then
-  log "无法读取 Komari 镜像 ID，跳过更新。"
-  exit 0
-fi
-
-if [ -n "${old_image}" ] && [ "${old_image}" = "${new_image}" ] && \
-  docker ps --filter "name=^/${CONTAINER}$" --filter "status=running" --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
+if [ -f "${BINARY_PATH}" ] && cmp -s "${tmp_binary}" "${BINARY_PATH}"; then
+  rm -f "${tmp_binary}"
   log "Komari 已是最新版本。"
   exit 0
 fi
 
-backup_container=""
-if docker inspect "${CONTAINER}" >/dev/null 2>&1; then
-  backup_container="${CONTAINER}-backup-$(date +%s)"
-  docker stop "${CONTAINER}" >/dev/null 2>&1 || true
-  docker rename "${CONTAINER}" "${backup_container}"
+mkdir -p "${INSTALL_DIR}"
+if [ -f "${BINARY_PATH}" ]; then
+  cp "${BINARY_PATH}" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)" || true
 fi
 
-docker network create "${NETWORK}" >/dev/null 2>&1 || true
+systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+install -m 0755 "${tmp_binary}" "${BINARY_PATH}"
+rm -f "${tmp_binary}"
 
-if docker run -d \
-  --name "${CONTAINER}" \
-  --restart unless-stopped \
-  --network "${NETWORK}" \
-  -p "${KOMARI_BIND_ADDRESS}:${KOMARI_HOST_PORT}:25774" \
-  -v "${DATA_DIR}:/app/data" \
-  "${IMAGE}" >/dev/null; then
-  [ -n "${backup_container}" ] && docker rm -f "${backup_container}" >/dev/null 2>&1 || true
+if systemctl start "${SERVICE_NAME}.service" && systemctl is-active --quiet "${SERVICE_NAME}.service"; then
   log "Komari 已更新并重启。"
   exit 0
 fi
 
-log "新 Komari 容器启动失败，尝试恢复旧容器。"
-docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
-if [ -n "${backup_container}" ] && docker inspect "${backup_container}" >/dev/null 2>&1; then
-  docker rename "${backup_container}" "${CONTAINER}"
-  docker start "${CONTAINER}" >/dev/null 2>&1 || true
-fi
+log "Komari 更新后启动失败，请检查: journalctl -u ${SERVICE_NAME} -f"
 exit 1
 UPDATEEOF
 
@@ -1617,9 +1435,9 @@ UPDATEEOF
 
   cat > /etc/systemd/system/taobox-komari-update.service <<'SERVICEEOF'
 [Unit]
-Description=TaoBox Komari image update
-After=docker.service network-online.target
-Wants=docker.service network-online.target
+Description=TaoBox Komari native binary update
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
@@ -1639,88 +1457,40 @@ Persistent=true
 WantedBy=timers.target
 TIMEREOF
 
-  if ! systemctl daemon-reload; then
-    log_warn "systemd daemon-reload 失败，已跳过每周自动升级定时器。"
-    return 0
-  fi
-
-  if ! systemctl enable --now taobox-komari-update.timer; then
-    log_warn "启用 Komari 每周自动升级定时器失败，请稍后手动检查。"
-  fi
+  systemctl daemon-reload
+  systemctl enable --now taobox-komari-update.timer >/dev/null 2>&1 || true
 }
 
-ensure_docker_ready
+write_result_file() {
+  [ -n "${KOMARI_RESULT_FILE}" ] || return 0
+  {
+    printf 'KOMARI_ACCESS_URL=%q\n' "${ACCESS_URL}"
+    printf 'KOMARI_INITIAL_PASSWORD=%q\n' "${INITIAL_PASSWORD}"
+  } > "${KOMARI_RESULT_FILE}"
+}
 
-mkdir -p "${KOMARI_HOME}/data" "${KOMARI_HOME}/caddy_data" "${KOMARI_HOME}/caddy_config"
-if [ -n "$(find "${KOMARI_HOME}/data" -mindepth 1 -print -quit 2>/dev/null)" ]; then
-  log_warn "检测到已有 Komari 数据，初始账号密码只会在首次初始化时生效。"
+if [ ! -d /run/systemd/system ]; then
+  log_err "当前环境未运行 systemd，无法使用 Komari 官方原生服务安装。"
+  exit 1
 fi
 
-docker pull ghcr.io/komari-monitor/komari:latest
-
-docker rm -f komari-caddy >/dev/null 2>&1 || true
-print_dns_hint
-
-detected_proxy_mode="$(detect_proxy_mode)"
-case "${detected_proxy_mode}" in
-  direct)
-    configure_direct_access
-    ;;
-  *)
-    KOMARI_BIND_ADDRESS="127.0.0.1"
-    ;;
-esac
-
-start_komari_container
-
-case "${detected_proxy_mode}" in
-  nginx)
-    configure_nginx_proxy || {
-      if configure_docker_caddy_proxy; then
-        :
-      else
-        configure_direct_access
-        start_komari_container
-      fi
-    }
-    ;;
-  caddy)
-    configure_host_caddy_proxy || {
-      if configure_docker_caddy_proxy; then
-        :
-      else
-        configure_direct_access
-        start_komari_container
-      fi
-    }
-    ;;
-  docker-caddy)
-    configure_docker_caddy_proxy || {
-      configure_direct_access
-      start_komari_container
-    }
-    ;;
-  direct)
-    log_warn "80/443 被占用且未识别到可自动配置的 Nginx / Caddy，已使用 ${KOMARI_HOST_PORT} 端口直连。"
-    ;;
-esac
-
-write_komari_env
-
-install_komari_update_timer
-
+install_dependencies
+cleanup_legacy_docker_komari
+install_komari_binary
+write_komari_service
+write_nginx_proxy
+install_update_timer
 write_result_file
 
-log "Komari 容器状态："
-docker ps --filter "name=komari" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-log "反代模式: ${KOMARI_PROXY_MODE}"
-log "访问地址: ${KOMARI_ACCESS_URL}"
+log "Komari 原生服务状态："
+systemctl --no-pager --full status komari.service | sed -n '1,8p' || true
+log "访问地址: ${ACCESS_URL}"
 EOF
 
   if [ -n "${root_cmd}" ]; then
-    ${root_cmd} bash "${tmp_script}" "${komari_domain}" "${admin_user}" "${admin_pass}" "${result_file}" || rc=$?
+    ${root_cmd} bash "${tmp_script}" "${komari_domain}" "${result_file}" || rc=$?
   else
-    bash "${tmp_script}" "${komari_domain}" "${admin_user}" "${admin_pass}" "${result_file}" || rc=$?
+    bash "${tmp_script}" "${komari_domain}" "${result_file}" || rc=$?
   fi
   rm -f "${tmp_script}"
 
@@ -1734,18 +1504,19 @@ EOF
     # shellcheck disable=SC1090
     . "${result_file}"
     komari_access_url="${KOMARI_ACCESS_URL:-}"
-    komari_proxy_mode="${KOMARI_PROXY_MODE:-}"
+    komari_initial_password="${KOMARI_INITIAL_PASSWORD:-}"
   fi
   rm -f "${result_file}"
 
   ok "Komari 安装完成。"
-  say "访问地址: ${komari_access_url:-https://${komari_domain}}"
-  say "反代模式: ${komari_proxy_mode:-auto}"
-  say "初始账号: ${admin_user}"
-  say "初始密码: ${admin_pass}"
-  say "管理目录: /opt/komari"
+  say "访问地址: ${komari_access_url:-http://${komari_domain}}"
+  if [ -n "${komari_initial_password}" ]; then
+    say "初始登录信息（仅显示一次）: ${komari_initial_password}"
+  else
+    warn "未获取到初始密码；如果是重装并保留数据，这是正常的。可查看: journalctl -u komari -n 80"
+  fi
+  say "服务管理: systemctl status komari"
   say "每周自动升级: systemctl list-timers taobox-komari-update.timer"
-  say "查看日志: docker logs -f komari 或 docker logs -f komari-caddy"
 }
 
 detect_firewall_backend() {
