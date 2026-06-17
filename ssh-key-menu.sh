@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.12"
+TOOLBOX_VERSION="0.12.13"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -1429,99 +1429,6 @@ EOF
   return "${rc}"
 }
 
-option_web_gateway_add_proxy() {
-  local app_slug=""
-  local domain=""
-  local upstream_host=""
-  local upstream_port=""
-  local result_file=""
-  local web_access_url=""
-
-  prompt_read -p "项目名称 [app]: " app_slug
-  app_slug="$(sanitize_slug "${app_slug:-app}")"
-
-  prompt_read -p "请输入域名: " domain
-  domain="$(normalize_domain_input "${domain}")"
-  if ! is_valid_domain "${domain}"; then
-    err "域名格式无效。示例: app.example.com"
-    return 1
-  fi
-
-  prompt_read -p "上游地址 [127.0.0.1]: " upstream_host
-  upstream_host="${upstream_host:-127.0.0.1}"
-
-  prompt_read -p "上游端口: " upstream_port
-  if ! is_valid_port "${upstream_port}"; then
-    err "端口无效，应为 1-65535。"
-    return 1
-  fi
-
-  result_file="$(mktemp)"
-  if ! run_web_gateway_register_proxy "${app_slug}" "${app_slug}" "${domain}" "${upstream_host}" "${upstream_port}" "${result_file}"; then
-    rm -f "${result_file}"
-    err "Web 网关注册失败。"
-    return 1
-  fi
-
-  if [ -r "${result_file}" ]; then
-    # shellcheck disable=SC1090
-    . "${result_file}"
-    web_access_url="${WEB_ACCESS_URL:-}"
-  fi
-  rm -f "${result_file}"
-
-  ok "Web 网关注册完成。"
-  say "访问地址: ${web_access_url:-http://${domain}}"
-}
-
-option_web_gateway_status() {
-  local root_cmd=""
-  local tmp_script=""
-  local rc=0
-
-  if ! root_cmd="$(sudo_prefix)"; then
-    err "需要 root 或 sudo 权限才能查看 Web 网关状态。"
-    return 1
-  fi
-
-  tmp_script="$(mktemp)"
-  cat > "${tmp_script}" <<'EOF'
-set -e
-
-section() { printf '\n===== %s =====\n' "$1"; }
-
-section "监听端口"
-ss -ltnp 2>/dev/null | grep -E ':(80|443|8444|10443)\b' || true
-
-section "Nginx 配置检测"
-nginx -t 2>&1 || true
-
-section "TaoBox 反代站点"
-ls -1 /etc/nginx/conf.d/00-taobox-web-*.conf 2>/dev/null || true
-
-section "TaoBox SNI 分流"
-ls -1 /etc/nginx/stream-map.d/*.conf 2>/dev/null || true
-if [ -d /etc/nginx/stream-map.d ]; then
-  grep -RIn . /etc/nginx/stream-map.d 2>/dev/null || true
-fi
-
-section "证书"
-if command -v certbot >/dev/null 2>&1; then
-  certbot certificates 2>&1 || true
-else
-  echo "certbot 未安装"
-fi
-EOF
-
-  if [ -n "${root_cmd}" ]; then
-    ${root_cmd} bash "${tmp_script}" || rc=$?
-  else
-    bash "${tmp_script}" || rc=$?
-  fi
-  rm -f "${tmp_script}"
-  return "${rc}"
-}
-
 option_install_komari_server() {
   local root_cmd=""
   local tmp_script=""
@@ -2709,8 +2616,8 @@ print_toolbox_menu() {
   print_divider
   menu_item "1" "SSH 登录管理"
   menu_item "2" "多协议节点一键搭建"
-  menu_item "3" "Docker + NPM 安装 / 容器管理"
-  menu_item "4" "Web 网关 / 域名反代"
+  menu_item "3" "项目应用一键安装"
+  menu_item "4" "Docker + NPM 安装 / 容器管理"
   menu_item "5" "网络工具 / BBR"
   menu_item "6" "系统工具 / DD"
   menu_item "7" "更新工具箱"
@@ -2817,22 +2724,20 @@ firewall_menu_loop() {
   done
 }
 
-web_gateway_menu_loop() {
+app_projects_menu_loop() {
   local choice=""
   while true; do
     clear 2>/dev/null || true
     print_logo
-    print_section_title "Web 网关 / 域名反代"
+    print_section_title "项目应用一键安装"
     print_divider
-    menu_item "1" "添加 / 更新反代"
-    menu_item "2" "查看网关状态"
+    menu_item "1" "安装 Komari 服务器监控"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
     printf '\n'
     case "${choice}" in
-      1) option_web_gateway_add_proxy ;;
-      2) option_web_gateway_status ;;
+      1) option_install_komari_server ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
@@ -2884,8 +2789,7 @@ system_tools_menu_loop() {
     menu_item "4" "重启 SSH 服务"
     menu_item "5" "查看最近登录"
     menu_item "6" "重启服务器"
-    menu_item "7" "安装 Komari 服务器监控"
-    menu_item "8" "DD 重装系统（危险）"
+    menu_item "7" "DD 重装系统（危险）"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -2897,8 +2801,7 @@ system_tools_menu_loop() {
       4) option_restart_ssh_service ;;
       5) option_recent_logins ;;
       6) option_reboot_server ;;
-      7) option_install_komari_server ;;
-      8) dd_reinstall_menu_loop ;;
+      7) dd_reinstall_menu_loop ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
@@ -2938,8 +2841,8 @@ main_loop() {
     case "${choice}" in
       1) ssh_menu_loop ;;
       2) option_run_vless_project ;;
-      3) docker_npm_menu_loop ;;
-      4) web_gateway_menu_loop ;;
+      3) app_projects_menu_loop ;;
+      4) docker_npm_menu_loop ;;
       5) network_menu_loop ;;
       6) system_tools_menu_loop ;;
       7) option_update_toolbox ;;
