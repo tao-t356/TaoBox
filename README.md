@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.7`
+- TaoBox VPS Toolbox：`v0.12.8`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -158,7 +158,14 @@ Nginx Proxy Manager 安装脚本来自：
 - 安装 Komari 服务器监控
 - DD 重装系统入口
 
-Komari 安装入口会提示输入域名，然后自动安装 Docker、部署 Komari + Caddy HTTPS 反代，并创建每周自动检测 / 升级 Komari 镜像的 systemd timer。
+Komari 安装入口会提示输入域名，然后自动安装 Docker、部署 Komari，并自动适配反代：
+
+- 已有 Nginx：自动写入 Nginx 反代，并尝试通过 `certbot --nginx` 申请 HTTPS 证书
+- 已有 Caddy：自动写入 Caddy 站点配置，由 Caddy 自动签发 HTTPS 证书
+- 没有现有 Web 服务且 80/443 空闲：自动启动内置 Caddy 容器
+- 80/443 被其它服务占用且无法识别：自动开放 `25774` 端口直连兜底
+
+安装时还会创建每周自动检测 / 升级 Komari 镜像的 systemd timer。
 
 默认初始登录信息：
 
