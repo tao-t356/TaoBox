@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.17"
+TOOLBOX_VERSION="0.12.18"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -709,14 +709,6 @@ option_run_vless_project() {
   say "- 域名: ${vless_domain}"
   say "- 443 共用: 由多协议脚本自动检测并迁移宿主机 Nginx"
   say "- 证书: 由多协议脚本自动申请 / 复用"
-  prompt_read -p "确认继续？[Y/n]: " confirm
-  case "${confirm}" in
-    ""|y|Y) ;;
-    *)
-      warn "已取消。"
-      return 0
-      ;;
-  esac
 
   run_remote_installer \
     "vless-xhttp-reality-self" \
