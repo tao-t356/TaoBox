@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.14"
+TOOLBOX_VERSION="0.12.17"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -547,9 +547,12 @@ run_remote_installer() {
   local project_url="$2"
   local note="${3:-}"
   local script_arg="${4:-}"
+  local preset_domain="${5:-}"
   local jshook=""
   local tmp_file=""
   local download_url=""
+  local old_taobox_preset_domain="${TAOBOX_PRESET_DOMAIN-}"
+  local had_taobox_preset_domain=0
 
   if [ "$(id -u)" -ne 0 ]; then
     err "${project_name} 建议使用 root 运行。"
@@ -591,16 +594,81 @@ run_remote_installer() {
   fi
 
   chmod +x "${tmp_file}"
+  if [ -n "${preset_domain}" ] && [ "${project_url}" = "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/scripts/install.sh" ]; then
+    if ! patch_vless_project_installer_for_taobox "${tmp_file}"; then
+      rm -f "${tmp_file}"
+      err "多协议脚本兼容补丁失败，已取消执行。"
+      return 1
+    fi
+  fi
+
   local rc=0
+  if [ "${TAOBOX_PRESET_DOMAIN+x}" = "x" ]; then
+    had_taobox_preset_domain=1
+  fi
+  if [ -n "${preset_domain}" ]; then
+    export TAOBOX_PRESET_DOMAIN="${preset_domain}"
+  fi
+
   if [ -n "${script_arg}" ]; then
     run_with_tty bash "${tmp_file}" "${script_arg}" || rc=$?
   else
     run_with_tty bash "${tmp_file}" || rc=$?
   fi
+
+  if [ "${had_taobox_preset_domain}" -eq 1 ]; then
+    export TAOBOX_PRESET_DOMAIN="${old_taobox_preset_domain}"
+  else
+    unset TAOBOX_PRESET_DOMAIN
+  fi
+
   rm -f "${tmp_file}"
   printf '\n'
   prompt_read -p "按回车返回工具箱..." _
   return "${rc}"
+}
+
+patch_vless_project_installer_for_taobox() {
+  local script_file="$1"
+  local patched_file=""
+
+  patched_file="$(mktemp)"
+  if awk '
+    $0 == "  read -r -p \"请输入域名: \" DOMAIN" {
+      print "  if [[ -n \"${TAOBOX_PRESET_DOMAIN:-}\" ]]; then"
+      print "    DOMAIN=\"${TAOBOX_PRESET_DOMAIN}\""
+      print "    green \"使用 TaoBox 传入域名: ${DOMAIN}\""
+      print "  else"
+      print "    read -r -p \"请输入域名: \" DOMAIN"
+      print "  fi"
+      domain_patched=1
+      next
+    }
+    $0 == "main \"$@\"" {
+      print "if [[ \"${1:-}\" == \"taobox-install\" ]]; then"
+      print "  require_root"
+      print "  require_supported_os"
+      print "  full_install"
+      print "else"
+      print "  main \"$@\""
+      print "fi"
+      main_patched=1
+      next
+    }
+    { print }
+    END {
+      if (!domain_patched || !main_patched) {
+        exit 42
+      }
+    }
+  ' "${script_file}" > "${patched_file}"; then
+    mv "${patched_file}" "${script_file}"
+    chmod +x "${script_file}"
+    return 0
+  fi
+
+  rm -f "${patched_file}"
+  return 1
 }
 
 option_run_taobox_speed() {
@@ -621,6 +689,8 @@ option_run_taobox_speed() {
 }
 
 option_run_vless_project() {
+  local vless_domain=""
+
   if [ -r /etc/os-release ]; then
     . /etc/os-release
     case "${ID:-}" in
@@ -631,10 +701,29 @@ option_run_vless_project() {
     esac
   fi
 
+  if ! read_app_domain "多协议脚本" vless_domain; then
+    return 1
+  fi
+
+  say "即将进入多协议脚本全新安装 / 重装流程。"
+  say "- 域名: ${vless_domain}"
+  say "- 443 共用: 由多协议脚本自动检测并迁移宿主机 Nginx"
+  say "- 证书: 由多协议脚本自动申请 / 复用"
+  prompt_read -p "确认继续？[Y/n]: " confirm
+  case "${confirm}" in
+    ""|y|Y) ;;
+    *)
+      warn "已取消。"
+      return 0
+      ;;
+  esac
+
   run_remote_installer \
     "vless-xhttp-reality-self" \
     "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/scripts/install.sh" \
-    "它会修改 Xray / Nginx / 证书等配置。"
+    "它会修改 Xray / Nginx / 证书等配置。" \
+    "taobox-install" \
+    "${vless_domain}"
 }
 
 option_npm_docker_info() {
@@ -1014,6 +1103,22 @@ normalize_domain_input() {
 
 is_valid_domain() {
   printf '%s' "$1" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
+}
+
+read_app_domain() {
+  local app_name="$1"
+  local result_var="$2"
+  local domain=""
+
+  prompt_read -p "请输入 ${app_name} 域名: " domain
+  domain="$(normalize_domain_input "${domain}")"
+
+  if ! is_valid_domain "${domain}"; then
+    err "域名格式无效。示例: app.example.com"
+    return 1
+  fi
+
+  printf -v "${result_var}" '%s' "${domain}"
 }
 
 is_valid_port() {
@@ -1429,6 +1534,34 @@ EOF
   return "${rc}"
 }
 
+register_shared_nginx_web_app() {
+  local app_slug="$1"
+  local app_name="$2"
+  local domain="$3"
+  local upstream_host="$4"
+  local upstream_port="$5"
+  local result_file="${6:-}"
+
+  domain="$(normalize_domain_input "${domain}")"
+  if ! is_valid_domain "${domain}"; then
+    err "${app_name} 域名格式无效。示例: app.example.com"
+    return 1
+  fi
+
+  if ! is_valid_port "${upstream_port}"; then
+    err "${app_name} 本机端口无效: ${upstream_port}"
+    return 1
+  fi
+
+  run_web_gateway_register_proxy \
+    "${app_slug}" \
+    "${app_name}" \
+    "${domain}" \
+    "${upstream_host}" \
+    "${upstream_port}" \
+    "${result_file}"
+}
+
 option_install_komari_server() {
   local root_cmd=""
   local tmp_script=""
@@ -1457,11 +1590,7 @@ option_install_komari_server() {
     return 1
   fi
 
-  prompt_read -p "请输入 Komari 域名: " komari_domain
-  komari_domain="$(normalize_domain_input "${komari_domain}")"
-
-  if ! is_valid_domain "${komari_domain}"; then
-    err "域名格式无效。示例: monitor.example.com"
+  if ! read_app_domain "Komari" komari_domain; then
     return 1
   fi
 
@@ -1486,9 +1615,6 @@ LISTEN_HOST="127.0.0.1"
 LISTEN_PORT="25774"
 KOMARI_ADMIN_USERNAME="facker668"
 KOMARI_ADMIN_PASSWORD="wohenshuai"
-KOMARI_INTERNAL_HTTPS_PORT="8444"
-SINGBOX_REALITY_LOCAL_PORT="10443"
-SINGBOX_CONFIG="/etc/sing-box/config.json"
 ACCESS_URL="http://${KOMARI_DOMAIN}"
 INITIAL_PASSWORD=""
 APT_UPDATED=0
@@ -1520,41 +1646,6 @@ detect_arch() {
   esac
 }
 
-port_in_use() {
-  local port="$1"
-  if ! have_cmd ss; then
-    return 1
-  fi
-  ss -H -ltn "( sport = :${port} )" 2>/dev/null | grep -q .
-}
-
-port_owned_by() {
-  local port="$1"
-  local name="$2"
-  if ! have_cmd ss; then
-    return 1
-  fi
-  ss -H -ltnp "( sport = :${port} )" 2>/dev/null | grep -qi "${name}"
-}
-
-open_firewall_port() {
-  local port="$1"
-  local proto="${2:-tcp}"
-
-  if have_cmd ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
-  fi
-
-  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd --add-port="${port}/${proto}" --permanent >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
-}
-
-safe_domain_name() {
-  printf '%s' "${KOMARI_DOMAIN}" | tr -c 'A-Za-z0-9_.-' '_'
-}
-
 cleanup_legacy_docker_komari() {
   if have_cmd docker && docker info >/dev/null 2>&1; then
     docker rm -f komari-caddy komari >/dev/null 2>&1 || true
@@ -1563,7 +1654,7 @@ cleanup_legacy_docker_komari() {
 
 install_dependencies() {
   apt_update_once
-  apt-get install -y ca-certificates curl nginx python3
+  apt-get install -y ca-certificates curl python3
 }
 
 install_komari_binary() {
@@ -1660,281 +1751,6 @@ PY
 
   (cd "${DATA_DIR}" && "${BINARY_PATH}" permit-login) >/dev/null 2>&1 || true
   systemctl restart "${SERVICE_NAME}.service"
-}
-
-ensure_komari_origin_cert() {
-  local cert_dir="/etc/ssl/taobox-komari"
-  local safe_domain=""
-
-  safe_domain="$(safe_domain_name)"
-  KOMARI_ORIGIN_CERT="${cert_dir}/${safe_domain}.crt"
-  KOMARI_ORIGIN_KEY="${cert_dir}/${safe_domain}.key"
-
-  if [ -s "${KOMARI_ORIGIN_CERT}" ] && [ -s "${KOMARI_ORIGIN_KEY}" ]; then
-    return 0
-  fi
-
-  apt-get install -y openssl >/dev/null 2>&1 || true
-  if ! have_cmd openssl; then
-    log_err "缺少 openssl，无法为 Komari 生成 Nginx 内部 HTTPS 证书。"
-    exit 1
-  fi
-
-  mkdir -p "${cert_dir}"
-  openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-    -keyout "${KOMARI_ORIGIN_KEY}" \
-    -out "${KOMARI_ORIGIN_CERT}" \
-    -subj "/CN=${KOMARI_DOMAIN}" \
-    -addext "subjectAltName=DNS:${KOMARI_DOMAIN}" >/dev/null 2>&1
-  chmod 600 "${KOMARI_ORIGIN_KEY}"
-}
-
-install_nginx_stream_module() {
-  if nginx -V 2>&1 | grep -q -- '--with-stream=dynamic'; then
-    if [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
-      apt_update_once
-      apt-get install -y libnginx-mod-stream
-    fi
-
-    if [ -f /usr/lib/nginx/modules/ngx_stream_module.so ] && \
-      ! grep -Rqs 'ngx_stream_module.so' /etc/nginx/modules-enabled 2>/dev/null; then
-      mkdir -p /etc/nginx/modules-enabled
-      printf '%s\n' 'load_module modules/ngx_stream_module.so;' > /etc/nginx/modules-enabled/50-mod-stream.conf
-    fi
-  fi
-}
-
-ensure_nginx_stream_include() {
-  local include_line="include /etc/nginx/stream.d/*.conf;"
-
-  mkdir -p /etc/nginx/stream.d
-  if grep -Fq "${include_line}" /etc/nginx/nginx.conf; then
-    return 0
-  fi
-
-  cp /etc/nginx/nginx.conf "/etc/nginx/nginx.conf.taobox-komari-backup.$(date +%Y%m%d_%H%M%S)" || true
-  python3 - <<'PY'
-from pathlib import Path
-
-path = Path("/etc/nginx/nginx.conf")
-text = path.read_text()
-include_line = "include /etc/nginx/stream.d/*.conf;"
-if include_line not in text:
-    marker = "\nhttp {"
-    if marker in text:
-        text = text.replace(marker, "\n" + include_line + "\n\nhttp {", 1)
-    else:
-        text = text.rstrip() + "\n" + include_line + "\n"
-    path.write_text(text)
-PY
-}
-
-move_singbox_reality_to_local() {
-  if [ ! -f "${SINGBOX_CONFIG}" ] || ! have_cmd sing-box; then
-    log_err "检测到 443 被 sing-box 占用，但未找到 sing-box 配置或命令，无法自动共用 443。"
-    exit 1
-  fi
-
-  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && ! port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box; then
-    log_err "本机 ${SINGBOX_REALITY_LOCAL_PORT} 已被占用，无法迁移 sing-box REALITY。"
-    ss -ltnp "( sport = :${SINGBOX_REALITY_LOCAL_PORT} )" 2>/dev/null || true
-    exit 1
-  fi
-
-  cp "${SINGBOX_CONFIG}" "${SINGBOX_CONFIG}.taobox-komari-backup.$(date +%Y%m%d_%H%M%S)" || true
-  python3 - "${SINGBOX_CONFIG}" "${SINGBOX_REALITY_LOCAL_PORT}" <<'PY'
-import json
-import sys
-
-path, local_port = sys.argv[1], int(sys.argv[2])
-with open(path, "r", encoding="utf-8") as fh:
-    cfg = json.load(fh)
-
-changed = False
-found = False
-for inbound in cfg.get("inbounds", []):
-    tls = inbound.get("tls") or {}
-    reality = tls.get("reality") or {}
-    if inbound.get("type") == "vless" and inbound.get("listen_port") == 443 and reality.get("enabled"):
-        inbound["listen"] = "127.0.0.1"
-        inbound["listen_port"] = local_port
-        changed = True
-        found = True
-    elif inbound.get("type") == "vless" and inbound.get("listen_port") == local_port and reality.get("enabled"):
-        found = True
-
-if not found:
-    raise SystemExit("未找到 listen_port=443 的 sing-box REALITY vless 入站")
-
-if changed:
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
-PY
-
-  sing-box check -c "${SINGBOX_CONFIG}"
-}
-
-append_komari_internal_https_server() {
-  local conf_file="$1"
-
-  ensure_komari_origin_cert
-  if grep -q "listen 127.0.0.1:${KOMARI_INTERNAL_HTTPS_PORT} ssl" "${conf_file}"; then
-    return 0
-  fi
-
-  if port_in_use "${KOMARI_INTERNAL_HTTPS_PORT}" && ! port_owned_by "${KOMARI_INTERNAL_HTTPS_PORT}" nginx; then
-    log_err "本机 ${KOMARI_INTERNAL_HTTPS_PORT} 已被非 Nginx 服务占用，无法创建 Komari 内部 HTTPS 反代。"
-    ss -ltnp "( sport = :${KOMARI_INTERNAL_HTTPS_PORT} )" 2>/dev/null || true
-    exit 1
-  fi
-
-  cat >> "${conf_file}" <<NGINXEOF
-
-server {
-    listen 127.0.0.1:${KOMARI_INTERNAL_HTTPS_PORT} ssl http2;
-    server_name ${KOMARI_DOMAIN};
-
-    ssl_certificate     ${KOMARI_ORIGIN_CERT};
-    ssl_certificate_key ${KOMARI_ORIGIN_KEY};
-
-    location / {
-        proxy_pass http://${LISTEN_HOST}:${LISTEN_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-}
-NGINXEOF
-}
-
-configure_singbox_nginx_stream_share() {
-  local conf_file="$1"
-
-  log "检测到 443 被 sing-box 占用，自动配置 Nginx stream SNI 分流。"
-  install_nginx_stream_module
-  append_komari_internal_https_server "${conf_file}"
-  ensure_nginx_stream_include
-  move_singbox_reality_to_local
-
-  cat > /etc/nginx/stream.d/00-taobox-sni-router.conf <<NGINXEOF
-stream {
-    map \$ssl_preread_server_name \$taobox_sni_backend {
-        ${KOMARI_DOMAIN} taobox_komari_https;
-        default taobox_singbox_reality;
-    }
-
-    upstream taobox_singbox_reality {
-        server 127.0.0.1:${SINGBOX_REALITY_LOCAL_PORT};
-    }
-
-    upstream taobox_komari_https {
-        server 127.0.0.1:${KOMARI_INTERNAL_HTTPS_PORT};
-    }
-
-    server {
-        listen 443;
-        listen [::]:443;
-        proxy_pass \$taobox_sni_backend;
-        ssl_preread on;
-    }
-}
-NGINXEOF
-
-  nginx -t
-  systemctl restart sing-box
-  systemctl enable --now nginx >/dev/null 2>&1 || true
-  systemctl restart nginx
-  ACCESS_URL="https://${KOMARI_DOMAIN}"
-  open_firewall_port 443 tcp
-}
-
-should_use_singbox_stream_share() {
-  if port_in_use 443 && port_owned_by 443 sing-box; then
-    return 0
-  fi
-
-  if port_in_use "${SINGBOX_REALITY_LOCAL_PORT}" && port_owned_by "${SINGBOX_REALITY_LOCAL_PORT}" sing-box && \
-    [ -f /etc/nginx/stream.d/00-taobox-sni-router.conf ]; then
-    return 0
-  fi
-
-  return 1
-}
-
-write_nginx_proxy() {
-  local safe_domain=""
-  local conf_file=""
-
-  if port_in_use 80 && ! port_owned_by 80 nginx; then
-    log_err "端口 80 已被非 Nginx 服务占用，无法共用 Nginx。"
-    ss -ltnp "( sport = :80 )" 2>/dev/null || true
-    exit 1
-  fi
-
-  if port_in_use 443 && ! port_owned_by 443 nginx && ! port_owned_by 443 sing-box; then
-    log_warn "端口 443 已被非 Nginx/sing-box 服务占用，本次只写入 Nginx HTTP 反代。"
-    ss -ltnp "( sport = :443 )" 2>/dev/null || true
-  fi
-
-  safe_domain="$(safe_domain_name)"
-  conf_file="/etc/nginx/conf.d/00-taobox-komari-${safe_domain}.conf"
-  mkdir -p /etc/nginx/conf.d
-
-  cat > "${conf_file}" <<NGINXEOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${KOMARI_DOMAIN};
-
-    location / {
-        proxy_pass http://${LISTEN_HOST}:${LISTEN_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-}
-NGINXEOF
-
-  if should_use_singbox_stream_share; then
-    configure_singbox_nginx_stream_share "${conf_file}"
-    open_firewall_port 80 tcp
-    return 0
-  fi
-
-  if ! nginx -t; then
-    rm -f "${conf_file}"
-    log_err "Nginx 配置检测失败，已回滚 Komari 反代配置。"
-    exit 1
-  fi
-
-  systemctl enable --now nginx >/dev/null 2>&1 || true
-  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
-  open_firewall_port 80 tcp
-
-  if ! port_in_use 443 || port_owned_by 443 nginx; then
-    apt-get install -y certbot python3-certbot-nginx >/dev/null 2>&1 || true
-    if have_cmd certbot; then
-      if certbot --nginx -d "${KOMARI_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --redirect; then
-        ACCESS_URL="https://${KOMARI_DOMAIN}"
-        open_firewall_port 443 tcp
-      else
-        log_warn "证书申请失败，Nginx HTTP 反代仍可使用。"
-      fi
-    fi
-  fi
 }
 
 install_update_timer() {
@@ -2066,7 +1882,7 @@ EOF
     return "${rc}"
   fi
 
-  if ! run_web_gateway_register_proxy "komari" "Komari" "${komari_domain}" "127.0.0.1" "25774" "${result_file}"; then
+  if ! register_shared_nginx_web_app "komari" "Komari" "${komari_domain}" "127.0.0.1" "25774" "${result_file}"; then
     rm -f "${result_file}"
     err "Komari 已安装，但 Web 网关反代配置失败。"
     return 1
@@ -2615,7 +2431,7 @@ print_toolbox_menu() {
   say "  公钥条数 : $(count_authorized_keys)"
   print_divider
   menu_item "1" "SSH 登录管理"
-  menu_item "2" "项目安装"
+  menu_item "2" "多协议脚本"
   menu_item "3" "Docker + NPM 安装 / 容器管理"
   menu_item "4" "网络工具 / BBR"
   menu_item "5" "系统工具 / DD"
@@ -2723,29 +2539,6 @@ firewall_menu_loop() {
   done
 }
 
-project_install_menu_loop() {
-  local choice=""
-  while true; do
-    clear 2>/dev/null || true
-    print_logo
-    print_section_title "项目安装"
-    print_divider
-    menu_item "1" "多协议脚本"
-    menu_item "2" "Komari 服务器监控"
-    menu_back_item
-    print_divider
-    prompt_read -p "请输入你的选择: " choice
-    printf '\n'
-    case "${choice}" in
-      1) option_run_vless_project ;;
-      2) option_install_komari_server ;;
-      0) return 0 ;;
-      *) warn "无效选项，请重新输入。" ;;
-    esac
-    pause
-  done
-}
-
 network_menu_loop() {
   local choice=""
   while true; do
@@ -2791,6 +2584,7 @@ system_tools_menu_loop() {
     menu_item "5" "查看最近登录"
     menu_item "6" "重启服务器"
     menu_item "7" "DD 重装系统（危险）"
+    menu_item "8" "Komari 服务器监控"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -2803,6 +2597,7 @@ system_tools_menu_loop() {
       5) option_recent_logins ;;
       6) option_reboot_server ;;
       7) dd_reinstall_menu_loop ;;
+      8) option_install_komari_server ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
@@ -2841,7 +2636,7 @@ main_loop() {
     printf '\n'
     case "${choice}" in
       1) ssh_menu_loop ;;
-      2) project_install_menu_loop ;;
+      2) option_run_vless_project ;;
       3) docker_npm_menu_loop ;;
       4) network_menu_loop ;;
       5) system_tools_menu_loop ;;

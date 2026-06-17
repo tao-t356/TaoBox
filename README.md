@@ -1,12 +1,12 @@
 # TaoBox
 
-TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、TCP/BBR 调优、项目安装、Docker + Nginx Proxy Manager、网络诊断、系统工具和自更新能力。
+TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、多协议脚本集成、TCP/BBR 调优、Docker + Nginx Proxy Manager、网络诊断、系统工具和自更新能力。
 
 当前主线更偏向「登录 VPS 后直接用菜单完成常用运维与节点部署」，仓库中仍保留早期的 Ansible / SSH 配置生成文件，适合需要批量管理多台 VPS 的场景。
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.14`
+- TaoBox VPS Toolbox：`v0.12.17`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -63,7 +63,7 @@ f
 
 ```text
 1. SSH 登录管理
-2. 项目安装
+2. 多协议脚本
 3. Docker + NPM 安装 / 容器管理
 4. 网络工具 / BBR
 5. 系统工具 / DD
@@ -93,17 +93,7 @@ f
 2. 新开一个 SSH 会话确认公钥能登录
 3. 再关闭密码登录
 
-### 2. 项目安装
-
-项目安装菜单统一采用「选择项目 -> 输入域名 -> 自动安装项目 + 自动证书 + 自动反代 + 自动处理 443 共用」的流程。
-
-当前包含：
-
-```text
-1. 多协议脚本
-2. Komari 服务器监控
-0. 返回
-```
+### 2. 多协议脚本
 
 多协议脚本会下载并执行独立项目：
 
@@ -122,28 +112,7 @@ f
 
 TaoBox 下载该远程脚本时使用 GitHub API + 时间戳，并携带 `jshook`，避免缓存旧脚本。
 
-Komari 安装会复用 TaoBox Web 网关底座：
-
-- 443 空闲或已由 Nginx 占用时，自动尝试 certbot 证书
-- 443 被 TaoBox sing-box REALITY 占用时，自动启用 Nginx stream SNI 分流，多项目共用 443
-- 每个项目只需要安装本体并监听本机端口，域名反代由安装器自动注册
-
-Komari 安装入口会提示输入域名，然后按官方原生方式安装 Komari：
-
-- 下载官方 release 二进制到 `/opt/komari/komari`
-- 创建 `komari.service`，监听 `127.0.0.1:25774`
-- 自动注册域名反代，共用同一个 Nginx / 证书 / SNI 分流底座
-- 会清理旧版 TaoBox 创建的 `komari` / `komari-caddy` Docker 容器，避免继续占用 443
-
-安装时还会创建每周自动检测 / 升级 Komari 原生二进制的 systemd timer。
-
-默认管理员会设置为 `facker668` / `wohenshuai`；若 Komari 未来变更数据库结构导致用户名无法自动改写，脚本会保留官方默认用户名 `admin`，但仍会尝试设置默认密码。
-
-自动升级状态可通过以下命令查看：
-
-```bash
-systemctl list-timers taobox-komari-update.timer
-```
+从 TaoBox 进入多协议脚本时，会先输入域名，然后直接进入远程脚本的「全新安装 / 重装」流程。域名会传给远程脚本，由远程脚本自动处理证书申请、宿主机 Nginx 共用和 443 迁移。
 
 ### 3. Docker + NPM 安装 / 容器管理
 
@@ -189,6 +158,9 @@ Nginx Proxy Manager 安装脚本来自：
 - 查看最近登录
 - 重启服务器
 - DD 重装系统入口
+- Komari 服务器监控
+
+Komari 入口位于「系统工具 / DD」。安装时输入域名后，会按官方原生二进制方式安装 Komari，监听 `127.0.0.1:25774`，再自动注册到 TaoBox 共享 Nginx 网关，共用证书与 443 分流逻辑。
 
 DD 重装入口当前提供：
 
