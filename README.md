@@ -1,12 +1,12 @@
 # TaoBox
 
-TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、TCP/BBR 调优、节点部署、项目应用一键安装、Docker + Nginx Proxy Manager、网络诊断、系统工具和自更新能力。
+TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、TCP/BBR 调优、项目安装、Docker + Nginx Proxy Manager、网络诊断、系统工具和自更新能力。
 
 当前主线更偏向「登录 VPS 后直接用菜单完成常用运维与节点部署」，仓库中仍保留早期的 Ansible / SSH 配置生成文件，适合需要批量管理多台 VPS 的场景。
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.13`
+- TaoBox VPS Toolbox：`v0.12.14`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -63,12 +63,11 @@ f
 
 ```text
 1. SSH 登录管理
-2. 多协议节点一键搭建
-3. 项目应用一键安装
-4. Docker + NPM 安装 / 容器管理
-5. 网络工具 / BBR
-6. 系统工具 / DD
-7. 更新工具箱
+2. 项目安装
+3. Docker + NPM 安装 / 容器管理
+4. 网络工具 / BBR
+5. 系统工具 / DD
+6. 更新工具箱
 0. 退出
 ```
 
@@ -94,9 +93,19 @@ f
 2. 新开一个 SSH 会话确认公钥能登录
 3. 再关闭密码登录
 
-### 2. 多协议节点一键搭建
+### 2. 项目安装
 
-该菜单会下载并执行独立项目：
+项目安装菜单统一采用「选择项目 -> 输入域名 -> 自动安装项目 + 自动证书 + 自动反代 + 自动处理 443 共用」的流程。
+
+当前包含：
+
+```text
+1. 多协议脚本
+2. Komari 服务器监控
+0. 返回
+```
+
+多协议脚本会下载并执行独立项目：
 
 - 仓库：`https://github.com/tao-t356/vless-xhttp-reality-self`
 - 脚本：`scripts/install.sh`
@@ -113,15 +122,7 @@ f
 
 TaoBox 下载该远程脚本时使用 GitHub API + 时间戳，并携带 `jshook`，避免缓存旧脚本。
 
-### 3. 项目应用一键安装
-
-项目安装入口统一采用「先输入域名，再自动完成项目安装、证书、反代和端口共用」的流程。
-
-当前包含：
-
-- Komari 服务器监控
-
-内部会复用 TaoBox Web 网关底座：
+Komari 安装会复用 TaoBox Web 网关底座：
 
 - 443 空闲或已由 Nginx 占用时，自动尝试 certbot 证书
 - 443 被 TaoBox sing-box REALITY 占用时，自动启用 Nginx stream SNI 分流，多项目共用 443
@@ -144,9 +145,9 @@ Komari 安装入口会提示输入域名，然后按官方原生方式安装 Kom
 systemctl list-timers taobox-komari-update.timer
 ```
 
-### 4. Docker + NPM 安装 / 容器管理
+### 3. Docker + NPM 安装 / 容器管理
 
-第 4 项已整合原来的「Docker 容器管理」。进入后包含：
+第 3 项已整合原来的「Docker 容器管理」。进入后包含：
 
 ```text
 1. 安装 / 重装 Docker + Nginx Proxy Manager
@@ -166,7 +167,7 @@ Nginx Proxy Manager 安装脚本来自：
 
 同样通过 GitHub API + 时间戳拉取，避免 raw 缓存。
 
-### 5. 网络工具 / BBR
+### 4. 网络工具 / BBR
 
 包含：
 
@@ -177,7 +178,7 @@ Nginx Proxy Manager 安装脚本来自：
 - Traceroute / Tracepath
 - 查看本机路由
 
-### 6. 系统工具 / DD
+### 5. 系统工具 / DD
 
 包含：
 
@@ -198,7 +199,7 @@ DD 重装入口当前提供：
 
 > DD 重装属于危险操作，请确认服务商支持、备份数据并确保你知道 root 密码。
 
-### 7. 更新工具箱
+### 6. 更新工具箱
 
 会重新下载 `bootstrap-vps.sh` 并覆盖本地 `~/ssh-key-menu.sh`。当前更新逻辑也使用 GitHub API + 时间戳，避免缓存旧版本。
 

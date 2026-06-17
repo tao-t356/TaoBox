@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.13"
+TOOLBOX_VERSION="0.12.14"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -2729,12 +2729,11 @@ print_toolbox_menu() {
   say "  公钥条数 : $(count_authorized_keys)"
   print_divider
   menu_item "1" "SSH 登录管理"
-  menu_item "2" "多协议节点一键搭建"
-  menu_item "3" "项目应用一键安装"
-  menu_item "4" "Docker + NPM 安装 / 容器管理"
-  menu_item "5" "网络工具 / BBR"
-  menu_item "6" "系统工具 / DD"
-  menu_item "7" "更新工具箱"
+  menu_item "2" "项目安装"
+  menu_item "3" "Docker + NPM 安装 / 容器管理"
+  menu_item "4" "网络工具 / BBR"
+  menu_item "5" "系统工具 / DD"
+  menu_item "6" "更新工具箱"
   menu_exit_item
   print_divider
 }
@@ -2838,20 +2837,22 @@ firewall_menu_loop() {
   done
 }
 
-app_projects_menu_loop() {
+project_install_menu_loop() {
   local choice=""
   while true; do
     clear 2>/dev/null || true
     print_logo
-    print_section_title "项目应用一键安装"
+    print_section_title "项目安装"
     print_divider
-    menu_item "1" "安装 Komari 服务器监控"
+    menu_item "1" "多协议脚本"
+    menu_item "2" "Komari 服务器监控"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
     printf '\n'
     case "${choice}" in
-      1) option_install_komari_server ;;
+      1) option_run_vless_project ;;
+      2) option_install_komari_server ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
@@ -2954,12 +2955,11 @@ main_loop() {
     printf '\n'
     case "${choice}" in
       1) ssh_menu_loop ;;
-      2) option_run_vless_project ;;
-      3) app_projects_menu_loop ;;
-      4) docker_npm_menu_loop ;;
-      5) network_menu_loop ;;
-      6) system_tools_menu_loop ;;
-      7) option_update_toolbox ;;
+      2) project_install_menu_loop ;;
+      3) docker_npm_menu_loop ;;
+      4) network_menu_loop ;;
+      5) system_tools_menu_loop ;;
+      6) option_update_toolbox ;;
       0) exit 0 ;;
       *) warn "无效选项，请重新输入。"; pause ;;
     esac
