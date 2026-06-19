@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.19"
+TOOLBOX_VERSION="0.12.20"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -1668,6 +1668,159 @@ register_shared_nginx_web_app() {
     "${result_file}"
 }
 
+run_web_gateway_unregister_proxy() {
+  local app_name="$1"
+  local domain="${2:-}"
+  local upstream_port="${3:-}"
+  local root_cmd=""
+  local tmp_script=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能注销 Web 网关。"
+    return 1
+  fi
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+WEB_APP_NAME="${1:?missing app name}"
+WEB_DOMAIN="${2:-}"
+WEB_UPSTREAM_PORT="${3:-}"
+DOMAINS=()
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+
+safe_domain_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+append_domain() {
+  local domain="$1"
+  local existing=""
+
+  [ -n "${domain}" ] || return 0
+  for existing in "${DOMAINS[@]}"; do
+    [ "${existing}" = "${domain}" ] && return 0
+  done
+  DOMAINS+=("${domain}")
+}
+
+discover_domains_by_port() {
+  local conf_file=""
+  local domain=""
+
+  [ -n "${WEB_UPSTREAM_PORT}" ] || return 0
+  shopt -s nullglob
+  for conf_file in /etc/nginx/conf.d/00-taobox-web-*.conf; do
+    if grep -Eq "proxy_pass[[:space:]]+http://(127\.0\.0\.1|localhost):${WEB_UPSTREAM_PORT}([[:space:];/]|$)" "${conf_file}"; then
+      while IFS= read -r domain; do
+        append_domain "${domain}"
+      done < <(
+        awk '
+          /^[[:space:]]*server_name[[:space:]]+/ {
+            for (i = 2; i <= NF; i++) {
+              gsub(/;/, "", $i)
+              if ($i != "_" && $i !~ /^\$/) print $i
+            }
+          }
+        ' "${conf_file}"
+      )
+    fi
+  done
+  shopt -u nullglob
+}
+
+remove_domain_from_migrated_map() {
+  local domain="$1"
+  local migrated_map="/etc/nginx/stream-map.d/00-taobox-migrated.conf"
+  local tmp_file=""
+
+  [ -f "${migrated_map}" ] || return 0
+  tmp_file="$(mktemp)"
+  awk -v domain="${domain}" '$1 != domain { print }' "${migrated_map}" > "${tmp_file}"
+  if cmp -s "${tmp_file}" "${migrated_map}"; then
+    rm -f "${tmp_file}"
+  else
+    mv "${tmp_file}" "${migrated_map}"
+  fi
+}
+
+remove_gateway_for_domain() {
+  local domain="$1"
+  local safe_domain=""
+
+  safe_domain="$(safe_domain_name "${domain}")"
+  rm -f "/etc/nginx/conf.d/00-taobox-web-${safe_domain}.conf"
+  rm -f "/etc/nginx/stream-map.d/00-taobox-web-${safe_domain}.conf"
+  rm -f "/etc/nginx/stream-map.d/00-taobox-komari-${safe_domain}.conf"
+  rm -f "/etc/ssl/taobox-web/${safe_domain}.crt" "/etc/ssl/taobox-web/${safe_domain}.key"
+  remove_domain_from_migrated_map "${domain}"
+  log "已移除 Web 网关配置: ${domain}"
+}
+
+reload_nginx_if_available() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    log_warn "当前系统没有 nginx 命令，已跳过 Nginx 重载。"
+    return 0
+  fi
+
+  if ! nginx -t; then
+    log_warn "Nginx 配置检测失败，未执行重载。请手动检查。"
+    return 1
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  else
+    nginx -s reload
+  fi
+}
+
+append_domain "${WEB_DOMAIN}"
+discover_domains_by_port
+
+if [ "${#DOMAINS[@]}" -eq 0 ]; then
+  log_warn "未找到 ${WEB_APP_NAME} 的 TaoBox Nginx 反代配置。"
+  exit 0
+fi
+
+for domain in "${DOMAINS[@]}"; do
+  remove_gateway_for_domain "${domain}"
+done
+reload_nginx_if_available
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" "${app_name}" "${domain}" "${upstream_port}" || rc=$?
+  else
+    bash "${tmp_script}" "${app_name}" "${domain}" "${upstream_port}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+  return "${rc}"
+}
+
+unregister_shared_nginx_web_app() {
+  local app_name="$1"
+  local domain="${2:-}"
+  local upstream_port="${3:-}"
+
+  domain="$(normalize_domain_input "${domain}")"
+  if [ -n "${domain}" ] && ! is_valid_domain "${domain}"; then
+    err "${app_name} 域名格式无效。示例: app.example.com"
+    return 1
+  fi
+
+  if [ -n "${upstream_port}" ] && ! is_valid_port "${upstream_port}"; then
+    err "${app_name} 本机端口无效: ${upstream_port}"
+    return 1
+  fi
+
+  run_web_gateway_unregister_proxy "${app_name}" "${domain}" "${upstream_port}"
+}
+
 option_install_komari_server() {
   local root_cmd=""
   local tmp_script=""
@@ -2012,6 +2165,98 @@ EOF
   fi
   printf '%s服务管理:%s %ssystemctl status komari%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
   printf '%s每周自动升级:%s %ssystemctl list-timers taobox-komari-update.timer%s\n' "${C_BOLD}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
+  print_divider
+}
+
+option_uninstall_komari_server() {
+  local root_cmd=""
+  local tmp_script=""
+  local komari_domain=""
+  local confirm=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能卸载 Komari。"
+    return 1
+  fi
+
+  prompt_read -p "请输入 Komari 域名（留空自动查找 25774 反代）: " komari_domain
+  komari_domain="$(normalize_domain_input "${komari_domain}")"
+  if [ -n "${komari_domain}" ] && ! is_valid_domain "${komari_domain}"; then
+    err "Komari 域名格式无效。示例: komari.example.com"
+    return 1
+  fi
+
+  warn "即将卸载 Komari："
+  say "- 停止并删除 komari.service"
+  say "- 删除每周自动升级 taobox-komari-update.timer"
+  say "- 删除 /opt/komari（包含 Komari 数据）"
+  if [ -n "${komari_domain}" ]; then
+    say "- 删除 ${komari_domain} 的 TaoBox Nginx 反代配置"
+  else
+    say "- 自动查找并删除指向 127.0.0.1:25774 的 TaoBox Nginx 反代配置"
+  fi
+  prompt_read -p "确认卸载 Komari？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) ;;
+    *)
+      warn "已取消。"
+      return 0
+      ;;
+  esac
+
+  tmp_script="$(mktemp)"
+  cat > "${tmp_script}" <<'EOF'
+set -euo pipefail
+
+log() { printf '%s\n' "$*"; }
+log_warn() { printf '警告: %s\n' "$*" >&2; }
+
+if [ -d /run/systemd/system ]; then
+  systemctl disable --now komari.service >/dev/null 2>&1 || true
+  systemctl disable --now taobox-komari-update.timer >/dev/null 2>&1 || true
+  systemctl stop taobox-komari-update.service >/dev/null 2>&1 || true
+else
+  log_warn "当前环境未运行 systemd，已跳过 systemd 停止步骤。"
+fi
+
+rm -f /etc/systemd/system/komari.service
+rm -f /etc/systemd/system/taobox-komari-update.service
+rm -f /etc/systemd/system/taobox-komari-update.timer
+rm -f /usr/local/sbin/taobox-komari-update
+
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+  systemctl reset-failed >/dev/null 2>&1 || true
+fi
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  docker rm -f komari-caddy komari >/dev/null 2>&1 || true
+fi
+
+rm -rf /opt/komari
+log "Komari 服务、更新任务和 /opt/komari 已移除。"
+EOF
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} bash "${tmp_script}" || rc=$?
+  else
+    bash "${tmp_script}" || rc=$?
+  fi
+  rm -f "${tmp_script}"
+
+  if [ "${rc}" -ne 0 ]; then
+    err "Komari 卸载失败。"
+    return "${rc}"
+  fi
+
+  if ! unregister_shared_nginx_web_app "Komari" "${komari_domain}" "25774"; then
+    warn "Komari 已卸载，但 Web 网关清理可能未完成。请检查 /etc/nginx/conf.d 和 /etc/nginx/stream-map.d。"
+    return 1
+  fi
+
+  print_divider
+  ok "Komari 卸载完成。"
   print_divider
 }
 
@@ -2678,6 +2923,29 @@ network_menu_loop() {
   done
 }
 
+komari_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Komari 服务器监控"
+    print_divider
+    menu_item "1" "安装 / 重装 Komari"
+    menu_item "2" "卸载 Komari"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_install_komari_server ;;
+      2) option_uninstall_komari_server ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
 system_tools_menu_loop() {
   local choice=""
   while true; do
@@ -2705,7 +2973,7 @@ system_tools_menu_loop() {
       5) option_recent_logins ;;
       6) option_reboot_server ;;
       7) dd_reinstall_menu_loop ;;
-      8) option_install_komari_server ;;
+      8) komari_menu_loop ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
