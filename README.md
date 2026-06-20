@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.20`
+- TaoBox VPS Toolbox：`v0.12.21`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -111,6 +111,7 @@ f
 - 参数重置、备份恢复、卸载
 
 TaoBox 下载该远程脚本时使用 GitHub API + 时间戳，并携带 `jshook`，避免缓存旧脚本。
+进入该菜单时也会同步刷新 `/usr/local/bin/vless-xhttp-reality-self.sh`，避免单独运行维护脚本时仍停留在旧版本。
 
 从 TaoBox 进入多协议脚本时，会先输入域名，然后直接进入远程脚本的「全新安装 / 重装」流程。域名会传给远程脚本，由远程脚本自动处理证书申请、宿主机 Nginx 共用和 443 迁移。
 

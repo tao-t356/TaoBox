@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.20"
+TOOLBOX_VERSION="0.12.21"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -602,6 +602,10 @@ run_remote_installer() {
     fi
   fi
 
+  if [ "${project_url}" = "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/scripts/install.sh" ]; then
+    refresh_vless_project_installer_copy "${tmp_file}"
+  fi
+
   local rc=0
   if [ "${TAOBOX_PRESET_DOMAIN+x}" = "x" ]; then
     had_taobox_preset_domain=1
@@ -669,6 +673,31 @@ patch_vless_project_installer_for_taobox() {
 
   rm -f "${patched_file}"
   return 1
+}
+
+refresh_vless_project_installer_copy() {
+  local script_file="$1"
+  local install_path="/usr/local/bin/vless-xhttp-reality-self.sh"
+  local tmp_copy=""
+
+  [ -r "${script_file}" ] || return 0
+
+  if [ "$(id -u)" -ne 0 ]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "${install_path}")" 2>/dev/null || return 0
+
+  tmp_copy="$(mktemp)"
+  if cp "${script_file}" "${tmp_copy}" 2>/dev/null; then
+    chmod 0755 "${tmp_copy}" 2>/dev/null || true
+    if install -m 0755 "${tmp_copy}" "${install_path}" 2>/dev/null; then
+      say "已刷新多协议脚本维护副本: ${install_path}"
+    else
+      warn "未能刷新多协议脚本维护副本: ${install_path}"
+    fi
+  fi
+  rm -f "${tmp_copy}"
 }
 
 option_run_taobox_speed() {
