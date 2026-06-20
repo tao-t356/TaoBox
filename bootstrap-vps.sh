@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.21"
+TOOLBOX_VERSION="0.12.22"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -652,7 +652,7 @@ option_vless_project_info() {
   say "仓库: https://github.com/tao-t356/vless-xhttp-reality-self"
   say "用途: Debian / Ubuntu 上菜单式部署 VLESS + XHTTP + REALITY + Hysteria2"
   say "要求: root、域名已解析、80/443 可用"
-  say "运行方式: 会从 GitHub 拉取 scripts/install.sh 并执行"
+  say "运行方式: 会从 GitHub 拉取 install.sh，安装最新 Release 二进制并进入菜单"
   say "--------------------------------------------------"
 }
 
@@ -680,8 +680,8 @@ run_remote_installer() {
     https://raw.githubusercontent.com/tao-t356/TaoBox/main/scripts/taobox-speed.sh)
       download_url="https://api.github.com/repos/tao-t356/TaoBox/contents/scripts/taobox-speed.sh?ref=main&ts=$(date +%s)"
       ;;
-    https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/scripts/install.sh)
-      download_url="https://api.github.com/repos/tao-t356/vless-xhttp-reality-self/contents/scripts/install.sh?ref=main&ts=$(date +%s)"
+    https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh)
+      download_url="https://api.github.com/repos/tao-t356/vless-xhttp-reality-self/contents/install.sh?ref=main&ts=$(date +%s)"
       ;;
     https://raw.githubusercontent.com/tao-t356/Docker-Nginx-Proxy-Manager/main/install.sh)
       download_url="https://api.github.com/repos/tao-t356/Docker-Nginx-Proxy-Manager/contents/install.sh?ref=main&ts=$(date +%s)"
@@ -708,18 +708,6 @@ run_remote_installer() {
   fi
 
   chmod +x "${tmp_file}"
-  if [ -n "${preset_domain}" ] && [ "${project_url}" = "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/scripts/install.sh" ]; then
-    if ! patch_vless_project_installer_for_taobox "${tmp_file}"; then
-      rm -f "${tmp_file}"
-      err "多协议脚本兼容补丁失败，已取消执行。"
-      return 1
-    fi
-  fi
-
-  if [ "${project_url}" = "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/scripts/install.sh" ]; then
-    refresh_vless_project_installer_copy "${tmp_file}"
-  fi
-
   local rc=0
   if [ "${TAOBOX_PRESET_DOMAIN+x}" = "x" ]; then
     had_taobox_preset_domain=1
@@ -740,78 +728,37 @@ run_remote_installer() {
     unset TAOBOX_PRESET_DOMAIN
   fi
 
+  if [ "${project_url}" = "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh" ]; then
+    refresh_vless_project_legacy_launcher
+  fi
+
   rm -f "${tmp_file}"
   printf '\n'
   prompt_read -p "按回车返回工具箱..." _
   return "${rc}"
 }
 
-patch_vless_project_installer_for_taobox() {
-  local script_file="$1"
-  local patched_file=""
-
-  patched_file="$(mktemp)"
-  if awk '
-    $0 == "  read -r -p \"请输入域名: \" DOMAIN" {
-      print "  if [[ -n \"${TAOBOX_PRESET_DOMAIN:-}\" ]]; then"
-      print "    DOMAIN=\"${TAOBOX_PRESET_DOMAIN}\""
-      print "    green \"使用 TaoBox 传入域名: ${DOMAIN}\""
-      print "  else"
-      print "    read -r -p \"请输入域名: \" DOMAIN"
-      print "  fi"
-      domain_patched=1
-      next
-    }
-    $0 == "main \"$@\"" {
-      print "if [[ \"${1:-}\" == \"taobox-install\" ]]; then"
-      print "  require_root"
-      print "  require_supported_os"
-      print "  full_install"
-      print "else"
-      print "  main \"$@\""
-      print "fi"
-      main_patched=1
-      next
-    }
-    { print }
-    END {
-      if (!domain_patched || !main_patched) {
-        exit 42
-      }
-    }
-  ' "${script_file}" > "${patched_file}"; then
-    mv "${patched_file}" "${script_file}"
-    chmod +x "${script_file}"
-    return 0
-  fi
-
-  rm -f "${patched_file}"
-  return 1
-}
-
-refresh_vless_project_installer_copy() {
-  local script_file="$1"
-  local install_path="/usr/local/bin/vless-xhttp-reality-self.sh"
-  local tmp_copy=""
-
-  [ -r "${script_file}" ] || return 0
+refresh_vless_project_legacy_launcher() {
+  local bin_path="/usr/local/bin/vless-xhttp-reality-self"
+  local legacy_path="/usr/local/bin/vless-xhttp-reality-self.sh"
 
   if [ "$(id -u)" -ne 0 ]; then
     return 0
   fi
 
-  mkdir -p "$(dirname "${install_path}")" 2>/dev/null || return 0
+  [ -x "${bin_path}" ] || return 0
+  mkdir -p "$(dirname "${legacy_path}")" 2>/dev/null || return 0
 
-  tmp_copy="$(mktemp)"
-  if cp "${script_file}" "${tmp_copy}" 2>/dev/null; then
-    chmod 0755 "${tmp_copy}" 2>/dev/null || true
-    if install -m 0755 "${tmp_copy}" "${install_path}" 2>/dev/null; then
-      say "已刷新多协议脚本维护副本: ${install_path}"
-    else
-      warn "未能刷新多协议脚本维护副本: ${install_path}"
-    fi
+  if cat > "${legacy_path}" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/local/bin/vless-xhttp-reality-self "$@"
+EOF
+  then
+    chmod 0755 "${legacy_path}" 2>/dev/null || true
+    say "已刷新旧命令兼容入口: ${legacy_path}"
+  else
+    warn "未能刷新旧命令兼容入口: ${legacy_path}"
   fi
-  rm -f "${tmp_copy}"
 }
 
 option_run_taobox_speed() {
@@ -832,8 +779,6 @@ option_run_taobox_speed() {
 }
 
 option_run_vless_project() {
-  local vless_domain=""
-
   if [ -r /etc/os-release ]; then
     . /etc/os-release
     case "${ID:-}" in
@@ -844,21 +789,14 @@ option_run_vless_project() {
     esac
   fi
 
-  if ! read_app_domain "多协议脚本" vless_domain; then
-    return 1
-  fi
-
-  say "即将进入多协议脚本全新安装 / 重装流程。"
-  say "- 域名: ${vless_domain}"
-  say "- 443 共用: 由多协议脚本自动检测并迁移宿主机 Nginx"
-  say "- 证书: 由多协议脚本自动申请 / 复用"
+  say "即将安装 / 更新 vless-xhttp-reality-self 最新 Release 并进入项目菜单。"
+  say "- 安装入口: https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh"
+  say "- 二进制路径: /usr/local/bin/vless-xhttp-reality-self"
 
   run_remote_installer \
     "vless-xhttp-reality-self" \
-    "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/scripts/install.sh" \
-    "它会修改 Xray / Nginx / 证书等配置。" \
-    "taobox-install" \
-    "${vless_domain}"
+    "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh" \
+    "它会安装最新 Release 二进制并打开项目菜单。"
 }
 
 option_npm_docker_info() {

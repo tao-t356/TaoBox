@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.21`
+- TaoBox VPS Toolbox：`v0.12.22`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -98,7 +98,8 @@ f
 多协议脚本会下载并执行独立项目：
 
 - 仓库：`https://github.com/tao-t356/vless-xhttp-reality-self`
-- 脚本：`scripts/install.sh`
+- 安装入口：`install.sh`
+- 当前最新 Release：`v0.19.24`
 
 支持：
 
@@ -110,10 +111,10 @@ f
 - 服务状态、日志、重启
 - 参数重置、备份恢复、卸载
 
-TaoBox 下载该远程脚本时使用 GitHub API + 时间戳，并携带 `jshook`，避免缓存旧脚本。
-进入该菜单时也会同步刷新 `/usr/local/bin/vless-xhttp-reality-self.sh`，避免单独运行维护脚本时仍停留在旧版本。
+TaoBox 下载根目录 `install.sh` 时使用 GitHub API + 时间戳，并携带 `jshook`，避免缓存旧脚本。
+该安装器会安装 / 更新 `/usr/local/bin/vless-xhttp-reality-self` 二进制，并进入项目菜单。进入该菜单后，TaoBox 也会把旧的 `/usr/local/bin/vless-xhttp-reality-self.sh` 刷新成兼容入口，避免误跑旧脚本时仍停留在旧版本。
 
-从 TaoBox 进入多协议脚本时，会先输入域名，然后直接进入远程脚本的「全新安装 / 重装」流程。域名会传给远程脚本，由远程脚本自动处理证书申请、宿主机 Nginx 共用和 443 迁移。
+从 TaoBox 进入多协议脚本时，会先安装 / 更新上游最新 Release，然后打开上游项目菜单；域名、证书和协议选择由该项目菜单处理。
 
 ### 3. Docker + NPM 安装 / 容器管理
 
