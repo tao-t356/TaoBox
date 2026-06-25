@@ -1239,7 +1239,9 @@ WEB_RESULT_FILE="${6:-}"
 WEB_INTERNAL_HTTPS_PORT="8444"
 SINGBOX_REALITY_LOCAL_PORT="10443"
 SINGBOX_CONFIG="/etc/sing-box/config.json"
+ACME_WEBROOT="/var/www/taobox-acme"
 ACCESS_URL="http://${WEB_DOMAIN}"
+WEB_CERT_IS_TRUSTED=0
 APT_UPDATED=0
 
 log() { printf '%s\n' "$*"; }
@@ -1294,9 +1296,62 @@ install_gateway_dependencies() {
   apt-get install -y ca-certificates curl nginx python3 openssl
 }
 
+ensure_acme_webroot() {
+  mkdir -p "${ACME_WEBROOT}/.well-known/acme-challenge"
+  chmod 755 /var/www "${ACME_WEBROOT}" "${ACME_WEBROOT}/.well-known" "${ACME_WEBROOT}/.well-known/acme-challenge" 2>/dev/null || true
+}
+
+install_certbot_reload_hook() {
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/taobox-nginx-reload.sh <<'HOOKEOF'
+#!/usr/bin/env bash
+systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+HOOKEOF
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/taobox-nginx-reload.sh
+}
+
+use_letsencrypt_cert_if_present() {
+  local live_dir="/etc/letsencrypt/live/${WEB_DOMAIN}"
+
+  if [ -s "${live_dir}/fullchain.pem" ] && [ -s "${live_dir}/privkey.pem" ]; then
+    WEB_ORIGIN_CERT="${live_dir}/fullchain.pem"
+    WEB_ORIGIN_KEY="${live_dir}/privkey.pem"
+    WEB_CERT_IS_TRUSTED=1
+    install_certbot_reload_hook
+    return 0
+  fi
+
+  return 1
+}
+
+obtain_public_cert() {
+  ensure_acme_webroot
+  apt-get install -y certbot >/dev/null 2>&1 || return 1
+
+  if certbot certonly \
+    --webroot -w "${ACME_WEBROOT}" \
+    -d "${WEB_DOMAIN}" \
+    --cert-name "${WEB_DOMAIN}" \
+    --non-interactive \
+    --agree-tos \
+    --register-unsafely-without-email \
+    --keep-until-expiring; then
+    use_letsencrypt_cert_if_present
+    return $?
+  fi
+
+  return 1
+}
+
 ensure_origin_cert() {
   local cert_dir="/etc/ssl/taobox-web"
   local safe_domain=""
+
+  if use_letsencrypt_cert_if_present || obtain_public_cert; then
+    return 0
+  fi
+
+  log_warn "无法为 ${WEB_DOMAIN} 申请 Let's Encrypt 证书，将临时使用自签名证书；浏览器会提示不安全。请确认域名解析到本机且 80/tcp 可访问后重新运行安装。"
 
   safe_domain="$(safe_domain_name)"
   WEB_ORIGIN_CERT="${cert_dir}/${safe_domain}.crt"
@@ -1430,6 +1485,12 @@ server {
     listen [::]:80;
     server_name ${WEB_DOMAIN};
 
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
     location / {
         proxy_pass http://${WEB_UPSTREAM_HOST}:${WEB_UPSTREAM_PORT};
         proxy_http_version 1.1;
@@ -1444,6 +1505,14 @@ server {
     }
 }
 NGINXEOF
+}
+
+prepare_http_challenge_server() {
+  ensure_acme_webroot
+  nginx -t
+  systemctl enable --now nginx >/dev/null 2>&1 || true
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx
+  open_firewall_port 80 tcp
 }
 
 append_internal_https_server() {
@@ -1532,13 +1601,21 @@ configure_stream_share() {
   install_nginx_stream_module
   ensure_nginx_stream_include
   move_singbox_reality_to_local
+  if [ -f /etc/nginx/stream.d/00-taobox-sni-router.conf ]; then
+    systemctl restart sing-box
+  fi
+  prepare_http_challenge_server
   append_internal_https_server
   write_stream_router
   nginx -t
   systemctl restart sing-box
   systemctl enable --now nginx >/dev/null 2>&1 || true
   systemctl restart nginx
-  ACCESS_URL="https://${WEB_DOMAIN}"
+  if [ "${WEB_CERT_IS_TRUSTED}" -eq 1 ]; then
+    ACCESS_URL="https://${WEB_DOMAIN}"
+  else
+    ACCESS_URL="http://${WEB_DOMAIN}"
+  fi
   open_firewall_port 443 tcp
 }
 
