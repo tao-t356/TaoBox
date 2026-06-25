@@ -15,20 +15,19 @@ AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
 MARK_BEGIN="# BEGIN VPS-SSH-KEY-MENU"
 MARK_END="# END VPS-SSH-KEY-MENU"
 
+C_CYAN=""
+C_GREEN=""
+C_YELLOW=""
+C_RED=""
+C_BOLD=""
+C_RESET=""
 if command -v tput >/dev/null 2>&1 && [ -n "${TERM:-}" ] && [ "${TERM}" != "dumb" ]; then
-  C_CYAN="$(tput setaf 6)"
-  C_GREEN="$(tput setaf 2)"
-  C_YELLOW="$(tput setaf 3)"
-  C_RED="$(tput setaf 1)"
-  C_BOLD="$(tput bold)"
-  C_RESET="$(tput sgr0)"
-else
-  C_CYAN=""
-  C_GREEN=""
-  C_YELLOW=""
-  C_RED=""
-  C_BOLD=""
-  C_RESET=""
+  C_CYAN="$(tput setaf 6 2>/dev/null || true)"
+  C_GREEN="$(tput setaf 2 2>/dev/null || true)"
+  C_YELLOW="$(tput setaf 3 2>/dev/null || true)"
+  C_RED="$(tput setaf 1 2>/dev/null || true)"
+  C_BOLD="$(tput bold 2>/dev/null || true)"
+  C_RESET="$(tput sgr0 2>/dev/null || true)"
 fi
 
 say() { printf '%s\n' "$*"; }
