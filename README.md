@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.12.22`
+- TaoBox VPS Toolbox：`v0.13.0`
 - TaoBox Speed：`v1.0.0-taobox.4`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -148,6 +148,18 @@ Nginx Proxy Manager 安装脚本来自：
 - Ping 测试
 - Traceroute / Tracepath
 - 查看本机路由
+- Cloudflare WARP（补齐双栈 IPv4/IPv6、全局出站、socks5 分流、WARP+）
+
+WARP 通过委托上游 fscarmen WARP 菜单实现，进入后由该菜单选择双栈 / 全局 / socks5 等模式。默认下载来源：
+
+- `https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh`
+
+下载沿用 TaoBox 的 `jshook` 兼容方式。由于 `jshook` 主要用于访问 GitHub，如果当前受控网络拉不到默认的 gitlab 源，可用环境变量指向 GitHub 镜像后重试：
+
+```bash
+export WARP_INSTALLER_URL=<GitHub 镜像 menu.sh 地址>
+f
+```
 
 ### 5. 系统工具 / DD
 

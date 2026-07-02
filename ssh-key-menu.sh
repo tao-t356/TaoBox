@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.12.22"
+TOOLBOX_VERSION="0.13.0"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -716,6 +716,33 @@ option_run_nexttrace() {
     "NextTrace" \
     "https://nxtrace.org/nt" \
     "它会在线安装 NextTrace。"
+}
+
+option_run_warp() {
+  local warp_url=""
+  warp_url="${WARP_INSTALLER_URL:-https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh}"
+
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu|centos|rhel|fedora|alpine) ;;
+      *) warn "当前系统未在 fscarmen 常见支持列表内，脚本可能不兼容。" ;;
+    esac
+  fi
+
+  say "${C_BOLD}${C_CYAN}Cloudflare WARP (fscarmen)${C_RESET}"
+  say "--------------------------------------------------"
+  say "用途: 补齐双栈 IPv4/IPv6、全局出站、socks5 分流、WARP+"
+  say "来源: ${warp_url}"
+  say "说明: 将打开 fscarmen WARP 菜单，双栈相关选项在该菜单内选择。"
+  say "提示: 当前受控网络访问 GitHub 需 jshook；若默认 gitlab 源拉不到，"
+  say "      可用 GitHub 镜像覆盖：export WARP_INSTALLER_URL=<镜像地址> 后重试。"
+  say "--------------------------------------------------"
+
+  run_remote_installer \
+    "WARP (fscarmen)" \
+    "${warp_url}" \
+    "它会打开 fscarmen WARP 菜单，可配置双栈 IPv4/IPv6、全局出站、socks5、WARP+。"
 }
 
 option_xanmod_info() {
@@ -2834,6 +2861,7 @@ network_menu_loop() {
     menu_item "4" "Ping 测试"
     menu_item "5" "Traceroute / Tracepath"
     menu_item "6" "查看本机路由"
+    menu_item "7" "WARP (Cloudflare · 双栈/出站)"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -2845,6 +2873,7 @@ network_menu_loop() {
       4) option_ping_test ;;
       5) option_trace_test ;;
       6) option_show_ip_route ;;
+      7) option_run_warp ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
