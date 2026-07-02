@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.13.0"
+TOOLBOX_VERSION="0.13.1"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -2976,6 +2976,8 @@ network_menu_loop() {
     menu_item "5" "Traceroute / Tracepath"
     menu_item "6" "查看本机路由"
     menu_item "7" "WARP (Cloudflare · 双栈/出站)"
+    menu_item "8" "安装 XanMod 内核 (BBRv3)"
+    menu_item "9" "查看 XanMod / BBRv3 状态"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -2988,6 +2990,8 @@ network_menu_loop() {
       5) option_trace_test ;;
       6) option_show_ip_route ;;
       7) option_run_warp ;;
+      8) option_install_xanmod ;;
+      9) option_xanmod_info ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
