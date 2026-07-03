@@ -6,8 +6,8 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.13.2`
-- TaoBox Speed：`v1.0.0-taobox.5`
+- TaoBox VPS Toolbox：`v0.13.3`
+- TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
 
@@ -144,7 +144,7 @@ Nginx Proxy Manager 安装脚本来自：
 
 - 普通内核启用 BBR
 - 查看 BBR 状态
-- BBR 直连/落地优化（智能带宽检测，对接 Eric86777/vps-tcp-tune 菜单 3 的本地内置函数）
+- BBR 直连/落地优化（智能带宽检测，对接 Eric86777/vps-tcp-tune 菜单 3 的本地内置函数；TaoBox 入口默认全自动执行）
 - 安装 NextTrace
 - Ping 测试
 - Traceroute / Tracepath

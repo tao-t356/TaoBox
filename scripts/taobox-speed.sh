@@ -8,7 +8,7 @@ set -euo pipefail
 
 REPO_SLUG="tao-t356/TaoBox"
 REPO_RAW_BASE="https://raw.githubusercontent.com/${REPO_SLUG}/main"
-SPEED_SLAYER_VERSION="v1.0.0-taobox.5"
+SPEED_SLAYER_VERSION="v1.0.0-taobox.6"
 PROJECT_URL="https://github.com/${REPO_SLUG}"
 DEFAULT_JSHOOK="123"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
@@ -857,6 +857,7 @@ run_tcp_backend_silent() {
   local core
   core="$(load_tcp_core_lib)"
   (
+    set +e
     set +u
     AUTO_MODE=1
     # shellcheck disable=SC1090
@@ -880,12 +881,8 @@ run_tcp_direct_optimize() {
   require_root
   render_header_once
   tcp_status_panel || true
-  warn "此功能对接 Eric86777/vps-tcp-tune 菜单 3：BBR 直连/落地优化（智能带宽检测）。"
-  warn "会修改 sysctl、tc fq、MSS clamp、文件描述符、RPS/RFS 等系统网络参数。"
-  if ! confirm_action "是否继续？默认回车 = Y"; then
-    warn "已取消 BBR 直连/落地优化。"
-    return 0
-  fi
+  info "将按全自动模式执行 Eric86777/vps-tcp-tune 菜单 3：BBR 直连/落地优化（智能带宽检测）。"
+  info "默认自动采用推荐 SWAP、亚太地区缓冲区与推荐网络参数，不再中途询问。"
   install_shortcut || true
   mkdir -p "$WORK_DIR"
 
@@ -893,8 +890,9 @@ run_tcp_direct_optimize() {
   core="$(load_tcp_core_lib)"
   section "执行 BBR 直连/落地优化"
   (
+    set +e
     set +u
-    AUTO_MODE=0
+    AUTO_MODE=1
     # shellcheck disable=SC1090
     source "$core"
     bbr_configure_direct

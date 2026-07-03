@@ -439,7 +439,7 @@ add_swap() {
     fi
 
     # 确保 /swapfile 不再被使用
-    swapoff /swapfile 2>/dev/null
+    swapoff /swapfile 2>/dev/null || true
     
     # 删除旧的 /swapfile
     rm -f /swapfile
@@ -2249,16 +2249,21 @@ bbr_configure_direct() {
     local region="asia"
     local region_choice=""
     echo ""
-    echo -e "${gl_kjlan}请选择服务器主要服务的地区：${gl_bai}"
-    echo ""
-    echo "1. 亚太地区（港/日/新/韩等）⭐ 推荐"
-    echo "   延迟较低（RTT < 100ms），使用标准缓冲区"
-    echo ""
-    echo "2. 美国/欧洲（跨太平洋/大西洋）"
-    echo "   延迟较高（RTT 150-300ms），使用大缓冲区"
-    echo ""
-    read -e -p "请输入选择 [1]: " region_choice
-    region_choice=${region_choice:-1}
+    if [ "${AUTO_MODE:-0}" = "1" ]; then
+        region_choice="${BBR_DIRECT_REGION_CHOICE:-1}"
+        echo -e "${gl_zi}全自动模式：默认选择亚太地区（可用 BBR_DIRECT_REGION_CHOICE=2 改为美国/欧洲大缓冲区）${gl_bai}"
+    else
+        echo -e "${gl_kjlan}请选择服务器主要服务的地区：${gl_bai}"
+        echo ""
+        echo "1. 亚太地区（港/日/新/韩等）⭐ 推荐"
+        echo "   延迟较低（RTT < 100ms），使用标准缓冲区"
+        echo ""
+        echo "2. 美国/欧洲（跨太平洋/大西洋）"
+        echo "   延迟较高（RTT 150-300ms），使用大缓冲区"
+        echo ""
+        read -e -p "请输入选择 [1]: " region_choice
+        region_choice=${region_choice:-1}
+    fi
     case "$region_choice" in
         2) region="overseas" ;;
         *) region="asia" ;;
