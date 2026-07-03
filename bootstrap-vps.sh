@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.13.1"
+TOOLBOX_VERSION="0.13.2"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -777,6 +777,23 @@ option_run_taobox_speed() {
     "它会进入 TaoBox Speed 一体化流程：XanMod / BBRv3 / TCP 调优 + 节点部署。"
 }
 
+option_run_bbr_direct_optimize() {
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}" in
+      debian|ubuntu) ;;
+      *)
+        warn "当前系统不是 Debian / Ubuntu，脚本可能不兼容。"
+        ;;
+    esac
+  fi
+
+  run_remote_installer \
+    "TaoBox Speed · BBR 直连/落地优化" \
+    "https://raw.githubusercontent.com/tao-t356/TaoBox/main/scripts/taobox-speed.sh" \
+    "对接 Eric86777/vps-tcp-tune 菜单 3：BBR 直连/落地优化（智能带宽检测）。" \
+    "--tcp-direct"
+}
 option_run_vless_project() {
   if [ -r /etc/os-release ]; then
     . /etc/os-release
@@ -2971,13 +2988,14 @@ network_menu_loop() {
     print_divider
     menu_item "1" "普通内核启用 BBR"
     menu_item "2" "普通内核查看 BBR 状态"
-    menu_item "3" "安装 NextTrace"
-    menu_item "4" "Ping 测试"
-    menu_item "5" "Traceroute / Tracepath"
-    menu_item "6" "查看本机路由"
-    menu_item "7" "WARP (Cloudflare · 双栈/出站)"
-    menu_item "8" "安装 XanMod 内核 (BBRv3)"
-    menu_item "9" "查看 XanMod / BBRv3 状态"
+    menu_item "3" "BBR 直连/落地优化（智能带宽检测）"
+    menu_item "4" "安装 NextTrace"
+    menu_item "5" "Ping 测试"
+    menu_item "6" "Traceroute / Tracepath"
+    menu_item "7" "查看本机路由"
+    menu_item "8" "WARP (Cloudflare · 双栈/出站)"
+    menu_item "9" "安装 XanMod 内核 (BBRv3)"
+    menu_item "10" "查看 XanMod / BBRv3 状态"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -2985,13 +3003,14 @@ network_menu_loop() {
     case "${choice}" in
       1) option_enable_bbr ;;
       2) option_bbr_info ;;
-      3) option_run_nexttrace ;;
-      4) option_ping_test ;;
-      5) option_trace_test ;;
-      6) option_show_ip_route ;;
-      7) option_run_warp ;;
-      8) option_install_xanmod ;;
-      9) option_xanmod_info ;;
+      3) option_run_bbr_direct_optimize ;;
+      4) option_run_nexttrace ;;
+      5) option_ping_test ;;
+      6) option_trace_test ;;
+      7) option_show_ip_route ;;
+      8) option_run_warp ;;
+      9) option_install_xanmod ;;
+      10) option_xanmod_info ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac

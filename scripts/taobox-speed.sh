@@ -8,7 +8,7 @@ set -euo pipefail
 
 REPO_SLUG="tao-t356/TaoBox"
 REPO_RAW_BASE="https://raw.githubusercontent.com/${REPO_SLUG}/main"
-SPEED_SLAYER_VERSION="v1.0.0-taobox.4"
+SPEED_SLAYER_VERSION="v1.0.0-taobox.5"
 PROJECT_URL="https://github.com/${REPO_SLUG}"
 DEFAULT_JSHOOK="123"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
@@ -834,6 +834,19 @@ prepare_tcp_core_lib() {
   echo "$out"
 }
 
+load_tcp_core_lib() {
+  local src core
+  if [ -s "$TCP_CORE_LIB_LOCAL" ]; then
+    src="$TCP_CORE_LIB_LOCAL"
+  elif [ -s "$TCP_SCRIPT_LOCAL" ]; then
+    src="$TCP_SCRIPT_LOCAL"
+  else
+    src="$(download_script "scripts/lib/tcp-core.sh")"
+  fi
+  core="$(prepare_tcp_core_lib "$src")"
+  echo "$core"
+}
+
 run_tcp_backend_silent() {
   local ipv6_choice="$1"
   if [ "${SPEED_TCP_MODE:-native}" = "native" ]; then
@@ -841,33 +854,51 @@ run_tcp_backend_silent() {
     return 0
   fi
 
-  local src core
-  if [ -s "$TCP_CORE_LIB_LOCAL" ]; then
-    core="$TCP_CORE_LIB_LOCAL"
-  else
-    if [ -s "$TCP_SCRIPT_LOCAL" ]; then
-      src="$TCP_SCRIPT_LOCAL"
+  local core
+  core="$(load_tcp_core_lib)"
+  (
+    set +u
+    AUTO_MODE=1
+    # shellcheck disable=SC1090
+    source "$core"
+    echo "[15%] TCP 核心优化"
+    bbr_configure_direct
+    echo "[35%] DNS 与网络稳定性"
+    dns_purify_and_harden
+    echo "[55%] 首连稳定性修复"
+    realm_fix_timeout
+    if [[ "$ipv6_choice" =~ ^[Yy]$ ]]; then
+      echo "[75%] IPv6 策略应用"
+      disable_ipv6_permanent
     else
-      src="$(download_script "scripts/tcp-one-click-optimize.sh")"
+      echo "[75%] 跳过 IPv6 永久禁用"
     fi
-    core="$(prepare_tcp_core_lib "$src")"
+  )
+}
+
+run_tcp_direct_optimize() {
+  require_root
+  render_header_once
+  tcp_status_panel || true
+  warn "此功能对接 Eric86777/vps-tcp-tune 菜单 3：BBR 直连/落地优化（智能带宽检测）。"
+  warn "会修改 sysctl、tc fq、MSS clamp、文件描述符、RPS/RFS 等系统网络参数。"
+  if ! confirm_action "是否继续？默认回车 = Y"; then
+    warn "已取消 BBR 直连/落地优化。"
+    return 0
   fi
-  # shellcheck disable=SC1090
-  source "$core"
-  AUTO_MODE=1
-  echo "[15%] TCP 核心优化"
-  bbr_configure_direct
-  echo "[35%] DNS 与网络稳定性"
-  dns_purify_and_harden
-  echo "[55%] 首连稳定性修复"
-  realm_fix_timeout
-  if [[ "$ipv6_choice" =~ ^[Yy]$ ]]; then
-    echo "[75%] IPv6 策略应用"
-    disable_ipv6_permanent
-  else
-    echo "[75%] 跳过 IPv6 永久禁用"
-  fi
-  AUTO_MODE=""
+  install_shortcut || true
+  mkdir -p "$WORK_DIR"
+
+  local core
+  core="$(load_tcp_core_lib)"
+  section "执行 BBR 直连/落地优化"
+  (
+    set +u
+    AUTO_MODE=0
+    # shellcheck disable=SC1090
+    source "$core"
+    bbr_configure_direct
+  ) 2>&1 | tee "$WORK_DIR/tcp-direct-optimize.log"
 }
 
 run_tcp_optimize() {
@@ -1714,6 +1745,7 @@ Usage:
 
 Commands:
   --tcp-status           查看 TCP / BBR / 内核状态
+  --tcp-direct           仅执行 BBR 直连/落地优化（智能带宽检测）
   --optimize             执行全自动 TCP 优化：BBR v3 + 网络调优
   --optimize-only        仅执行 XanMod / BBRv3 / TCP 调优，不部署节点
   --install-argo-vmess   安装/重装 Argo VMess + WS，并生成节点/订阅 URL
@@ -1782,15 +1814,17 @@ menu_section_tcp() {
   section "TaoBox Speed · TCP 加速"
   cat <<'EOF'
 1. 查看 TCP / BBR / 内核状态
-2. 执行 TCP 优化
-3. 重启后继续安装
+2. BBR 直连/落地优化（智能带宽检测）
+3. 执行完整 TCP 优化
+4. 重启后继续安装
 0. 返回主页
 EOF
   read -r -p "请选择: " choice
   case "$choice" in
     1) tcp_status_panel ;;
-    2) run_tcp_optimize ;;
-    3) continue_after_reboot ;;
+    2) run_tcp_direct_optimize ;;
+    3) run_tcp_optimize ;;
+    4) continue_after_reboot ;;
     0) menu_body ;;
     *) err "无效选择"; return 1 ;;
   esac
@@ -1881,6 +1915,7 @@ default_action() {
 
 case "${1:-}" in
   --tcp-status) tcp_status_panel ;;
+  --tcp-direct) run_tcp_direct_optimize ;;
   --optimize) run_tcp_optimize ;;
   --optimize-only) run_tcp_optimize_only ;;
   --install-argo-vmess) install_argo_vmess_ws ;;
