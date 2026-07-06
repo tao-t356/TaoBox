@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.13.8"
+TOOLBOX_VERSION="0.13.9"
 DEFAULT_JSHOOK="123"
 VLESS_PROJECT_DEFAULT_DIST_REF="${VLESS_PROJECT_DEFAULT_DIST_REF:-main}"
 VLESS_PROJECT_FALLBACK_DIST_REF="${VLESS_PROJECT_FALLBACK_DIST_REF:-80ad369}"
@@ -2663,14 +2663,8 @@ option_update_toolbox() {
   bash "${tmp_script}" --no-run --target "${SCRIPT_PATH}"
   rm -f "${tmp_script}"
   ok "工具箱已更新到最新版本。"
-
-  prompt_read -p "是否立即重新打开工具箱？[Y/n]: " reopen
-  case "${reopen}" in
-    n|N) ;;
-    *)
-      exec bash "${SCRIPT_PATH}"
-      ;;
-  esac
+  say "正在重新打开工具箱..."
+  exec bash "${SCRIPT_PATH}"
 }
 
 detect_x86_64_psabi_level() {
