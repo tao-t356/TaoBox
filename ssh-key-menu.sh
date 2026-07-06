@@ -6,9 +6,10 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.13.5"
+TOOLBOX_VERSION="0.13.6"
 DEFAULT_JSHOOK="123"
-VLESS_PROJECT_DEFAULT_DIST_REF="80ad369"
+VLESS_PROJECT_DEFAULT_DIST_REF="${VLESS_PROJECT_DEFAULT_DIST_REF:-main}"
+VLESS_PROJECT_FALLBACK_DIST_REF="${VLESS_PROJECT_FALLBACK_DIST_REF:-80ad369}"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
 SSH_DIR="${CURRENT_HOME}/.ssh"
@@ -697,7 +698,7 @@ download_vless_project_asset() {
 install_and_run_vless_project() {
   local app_name="vless-xhttp-reality-self"
   local repo="${VLESS_PROJECT_REPO:-tao-t356/vless-xhttp-reality-self}"
-  local dist_ref="${VLESS_PROJECT_DIST_REF:-${VLESS_PROJECT_DEFAULT_DIST_REF}}"
+  local requested_dist_ref="${VLESS_PROJECT_DIST_REF:-}"
   local install_dir="${VLESS_PROJECT_INSTALL_DIR:-/usr/local/bin}"
   local jshook=""
   local arch=""
@@ -705,7 +706,12 @@ install_and_run_vless_project() {
   local tmp=""
   local archive=""
   local checksum_file=""
+  local dist_ref=""
+  local dist_refs=""
+  local selected_ref=""
   local version_text=""
+  local bin_file=""
+  local bin_name=""
   local legacy_helper=""
   local rc=0
 
@@ -717,73 +723,105 @@ install_and_run_vless_project() {
     err "VLESS_PROJECT_REPO 格式错误，应为 owner/repo: ${repo}"
     return 1
   fi
-  if ! printf '%s' "${dist_ref}" | grep -Eq '^[A-Za-z0-9_.-]+$'; then
-    err "VLESS_PROJECT_DIST_REF 格式错误: ${dist_ref}"
-    return 1
-  fi
   require_cmd tar || return 1
   require_cmd install || return 1
 
   arch="$(detect_vless_project_arch)" || return 1
   asset="${app_name}_linux_${arch}.tar.gz"
   jshook="$(get_effective_jshook)"
-  tmp="$(mktemp -d)"
-  archive="${tmp}/${asset}"
-  checksum_file="${tmp}/${asset}.sha256"
-
-  say "正在下载 ${app_name} 公开 dist 包: ${dist_ref} linux/${arch}"
-  if ! download_vless_project_asset "${repo}" "${dist_ref}" "${asset}" "${archive}" "${jshook}"; then
-    rm -rf "${tmp}"
-    err "下载失败: ${dist_ref}/dist/${asset}"
-    return 1
+  if [ -n "${requested_dist_ref}" ]; then
+    dist_refs="${requested_dist_ref}"
+  else
+    dist_refs="${VLESS_PROJECT_DEFAULT_DIST_REF}"
+    if [ "${VLESS_PROJECT_FALLBACK_DIST_REF}" != "${VLESS_PROJECT_DEFAULT_DIST_REF}" ]; then
+      dist_refs="${dist_refs} ${VLESS_PROJECT_FALLBACK_DIST_REF}"
+    fi
   fi
 
-  if download_vless_project_asset "${repo}" "${dist_ref}" "${asset}.sha256" "${checksum_file}" "${jshook}" 2>/dev/null; then
-    if have_cmd sha256sum; then
-      if ! (cd "${tmp}" && sha256sum -c "${asset}.sha256"); then
-        rm -rf "${tmp}"
-        err "SHA256 校验失败，已停止安装。"
-        return 1
+  for dist_ref in ${dist_refs}; do
+    if ! printf '%s' "${dist_ref}" | grep -Eq '^[A-Za-z0-9_.-]+$'; then
+      err "VLESS_PROJECT_DIST_REF 格式错误: ${dist_ref}"
+      rm -rf "${tmp:-}"
+      return 1
+    fi
+
+    rm -rf "${tmp:-}"
+    tmp="$(mktemp -d)"
+    archive="${tmp}/${asset}"
+    checksum_file="${tmp}/${asset}.sha256"
+
+    say "正在下载 ${app_name} 公开 dist 包: ${dist_ref} linux/${arch}"
+    if ! download_vless_project_asset "${repo}" "${dist_ref}" "${asset}" "${archive}" "${jshook}"; then
+      warn "下载失败: ${dist_ref}/dist/${asset}"
+      continue
+    fi
+
+    if download_vless_project_asset "${repo}" "${dist_ref}" "${asset}.sha256" "${checksum_file}" "${jshook}" 2>/dev/null; then
+      if have_cmd sha256sum; then
+        if ! (cd "${tmp}" && sha256sum -c "${asset}.sha256"); then
+          warn "SHA256 校验失败: ${dist_ref}"
+          continue
+        fi
+      else
+        warn "未找到 sha256sum，跳过 SHA256 校验。"
       fi
     else
-      warn "未找到 sha256sum，跳过 SHA256 校验。"
+      warn "未找到校验文件 ${asset}.sha256，跳过 SHA256 校验。"
     fi
-  else
-    warn "未找到校验文件 ${asset}.sha256，跳过 SHA256 校验。"
-  fi
 
-  if ! tar -xzf "${archive}" -C "${tmp}"; then
-    rm -rf "${tmp}"
-    err "解压失败: ${asset}"
-    return 1
-  fi
-  if [ ! -x "${tmp}/bin/${app_name}" ]; then
-    rm -rf "${tmp}"
-    err "发布包缺少 bin/${app_name}"
+    if ! tar -xzf "${archive}" -C "${tmp}"; then
+      warn "解压失败: ${dist_ref}/dist/${asset}"
+      continue
+    fi
+    if [ ! -x "${tmp}/bin/${app_name}" ]; then
+      warn "发布包缺少 bin/${app_name}: ${dist_ref}"
+      continue
+    fi
+
+    version_text=""
+    if [ -r "${tmp}/VERSION" ]; then
+      version_text="$(cat "${tmp}/VERSION" 2>/dev/null || true)"
+    fi
+    if [ -z "${requested_dist_ref}" ] && [ "${dist_ref}" != "${VLESS_PROJECT_FALLBACK_DIST_REF}" ]; then
+      if "${tmp}/bin/${app_name}" --help 2>/dev/null | grep -Eiq 'No-domain|免域名' \
+        && [ ! -x "${tmp}/bin/${app_name}-install-ip" ]; then
+        warn "上游 ${version_text:-${dist_ref}} 缺少免域名 sidecar，切换到稳定回退包。"
+        continue
+      fi
+    fi
+
+    selected_ref="${dist_ref}"
+    break
+  done
+
+  if [ -z "${selected_ref}" ]; then
+    rm -rf "${tmp:-}"
+    err "未能取得可用的 ${app_name} 公开 dist 包。"
     return 1
   fi
 
   install -d -m 0755 "${install_dir}"
-  install -m 0755 "${tmp}/bin/${app_name}" "${install_dir}/${app_name}"
-  if [ -x "${tmp}/bin/${app_name}-egress-pool" ]; then
-    install -m 0755 "${tmp}/bin/${app_name}-egress-pool" "${install_dir}/${app_name}-egress-pool"
+  for bin_file in "${tmp}/bin/"*; do
+    [ -f "${bin_file}" ] || continue
+    bin_name="$(basename "${bin_file}")"
+    install -m 0755 "${bin_file}" "${install_dir}/${bin_name}"
+  done
+
+  if [ ! -x "${install_dir}/${app_name}" ]; then
+    rm -rf "${tmp}"
+    err "安装后缺少 ${install_dir}/${app_name}"
+    return 1
   fi
   legacy_helper="${app_name}-$(printf '\166\160\156\147\141\164\145\055\164\157\160\062\060')"
-  if [ -x "${tmp}/bin/${legacy_helper}" ]; then
-    install -m 0755 "${tmp}/bin/${legacy_helper}" "${install_dir}/${legacy_helper}"
-    if [ ! -x "${install_dir}/${app_name}-egress-pool" ]; then
-      install -m 0755 "${tmp}/bin/${legacy_helper}" "${install_dir}/${app_name}-egress-pool"
-    fi
-  fi
-  if [ -r "${tmp}/VERSION" ]; then
-    version_text="$(cat "${tmp}/VERSION" 2>/dev/null || true)"
+  if [ -x "${tmp}/bin/${legacy_helper}" ] && [ ! -x "${install_dir}/${app_name}-egress-pool" ]; then
+    install -m 0755 "${tmp}/bin/${legacy_helper}" "${install_dir}/${app_name}-egress-pool"
   fi
   rm -rf "${tmp}"
 
   ok "安装完成: ${install_dir}/${app_name}${version_text:+ (${version_text})}"
   refresh_vless_project_legacy_launcher
   printf '\n'
-  RELEASE_REPO="${repo}" VXR_RELEASE_VERSION="${dist_ref}" run_with_tty "${install_dir}/${app_name}" menu || rc=$?
+  RELEASE_REPO="${repo}" VXR_RELEASE_VERSION="${selected_ref}" run_with_tty "${install_dir}/${app_name}" menu || rc=$?
   return "${rc}"
 }
 
@@ -832,9 +870,10 @@ option_run_vless_project() {
     esac
   fi
 
-  say "即将安装 / 更新 vless-xhttp-reality-self 公开稳定 dist 包并进入项目菜单。"
+  say "即将安装 / 更新 vless-xhttp-reality-self 最新公开 dist 包并进入项目菜单。"
   say "- 下载来源: https://api.github.com/repos/tao-t356/vless-xhttp-reality-self/contents/dist"
-  say "- 固定 ref: ${VLESS_PROJECT_DEFAULT_DIST_REF}（避开上游 main 当前私有 core 菜单项）"
+  say "- 默认 ref: ${VLESS_PROJECT_DEFAULT_DIST_REF}；失败时回退: ${VLESS_PROJECT_FALLBACK_DIST_REF}"
+  say "- 会安装包内全部 bin/ sidecar，免域名入口可随上游升级"
   say "- 二进制路径: /usr/local/bin/vless-xhttp-reality-self"
 
   local rc=0
