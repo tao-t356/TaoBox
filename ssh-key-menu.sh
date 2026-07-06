@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.13.9"
+TOOLBOX_VERSION="0.14.0"
 DEFAULT_JSHOOK="123"
 VLESS_PROJECT_DEFAULT_DIST_REF="${VLESS_PROJECT_DEFAULT_DIST_REF:-main}"
 VLESS_PROJECT_FALLBACK_DIST_REF="${VLESS_PROJECT_FALLBACK_DIST_REF:-80ad369}"
@@ -695,6 +695,128 @@ download_vless_project_asset() {
   fi
 }
 
+write_vless_project_install_ip_wrapper() {
+  local wrapper_path="$1"
+  local real_path="$2"
+
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -Eeuo pipefail\n'
+    printf 'VXR_INSTALL_IP_REAL=%q\n' "${real_path}"
+    cat <<'EOF'
+
+vxr_log() {
+  printf '%s\n' "$*"
+}
+
+vxr_warn() {
+  printf 'WARN: %s\n' "$*" >&2
+}
+
+vxr_have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+vxr_certbot_supports_ip() {
+  local certbot_bin="${1:-}"
+  [ -x "${certbot_bin}" ] || return 1
+  "${certbot_bin}" certonly --help all 2>/dev/null | grep -q -- "--ip-address"
+}
+
+vxr_python_venv_install_simulation_ok() {
+  vxr_have_cmd apt-get || return 0
+  DEBIAN_FRONTEND=noninteractive apt-get install -s python3-pip python3-venv >/dev/null 2>&1
+}
+
+vxr_download_virtualenv_pyz() {
+  local output="$1"
+  local url="${VXR_VIRTUALENV_PYZ_URL:-https://bootstrap.pypa.io/virtualenv.pyz}"
+
+  if vxr_have_cmd curl; then
+    curl -fsSL "${url}" -o "${output}"
+  elif vxr_have_cmd wget; then
+    wget -qO "${output}" "${url}"
+  else
+    return 1
+  fi
+}
+
+vxr_bootstrap_certbot_ip_without_apt_venv() {
+  local certbot_bin="${HY2_CERTBOT_BIN:-/usr/local/bin/certbot-ip}"
+  local certbot_venv="${HY2_CERTBOT_VENV:-/opt/certbot-ip}"
+  local tmp=""
+  local pyz=""
+
+  vxr_have_cmd python3 || return 1
+  tmp="$(mktemp -d)" || return 1
+  pyz="${tmp}/virtualenv.pyz"
+
+  if ! vxr_download_virtualenv_pyz "${pyz}"; then
+    rm -rf "${tmp}"
+    return 1
+  fi
+  if ! python3 "${pyz}" --clear "${certbot_venv}"; then
+    rm -rf "${tmp}"
+    return 1
+  fi
+  rm -rf "${tmp}"
+
+  "${certbot_venv}/bin/python" -m pip install --upgrade pip setuptools wheel
+  "${certbot_venv}/bin/python" -m pip install --upgrade certbot
+  install -d "$(dirname "${certbot_bin}")"
+  ln -sf "${certbot_venv}/bin/certbot" "${certbot_bin}"
+  vxr_certbot_supports_ip "${certbot_bin}"
+}
+
+vxr_print_python_venv_hint() {
+  vxr_warn "python3-venv 依赖不可用，通常是系统源混用、Python 包版本不一致或软件包被 hold。"
+  vxr_warn "可在 VPS 上检查：apt-cache policy python3 python3-venv python3.12 python3.12-venv"
+  vxr_warn "再检查：apt-mark showhold"
+  if vxr_have_cmd apt-cache; then
+    printf '\nAPT policy:\n' >&2
+    apt-cache policy python3 python3-venv python3.12 python3.12-venv 2>/dev/null >&2 || true
+  fi
+  if vxr_have_cmd apt-mark; then
+    printf '\nHeld packages:\n' >&2
+    apt-mark showhold 2>/dev/null >&2 || true
+  fi
+}
+
+vxr_main() {
+  local cert_mode="${HY2_CERT_MODE:-auto}"
+  local certbot_bin="${HY2_CERTBOT_BIN:-/usr/local/bin/certbot-ip}"
+
+  [ -x "${VXR_INSTALL_IP_REAL}" ] || {
+    vxr_warn "缺少上游免域名安装器: ${VXR_INSTALL_IP_REAL}"
+    exit 127
+  }
+
+  case "${cert_mode}" in
+    auto|"") ;;
+    *) exec "${VXR_INSTALL_IP_REAL}" "$@" ;;
+  esac
+
+  if vxr_certbot_supports_ip "${certbot_bin}" || vxr_python_venv_install_simulation_ok; then
+    exec "${VXR_INSTALL_IP_REAL}" "$@"
+  fi
+
+  vxr_warn "检测到 python3-venv 依赖异常，改用 TaoBox 兼容方式准备 certbot-ip。"
+  if vxr_bootstrap_certbot_ip_without_apt_venv; then
+    vxr_log "已准备 certbot-ip: ${certbot_bin}"
+    exec "${VXR_INSTALL_IP_REAL}" "$@"
+  fi
+
+  vxr_print_python_venv_hint
+  exit 100
+}
+
+vxr_main "$@"
+EOF
+  } > "${wrapper_path}" || return 1
+
+  chmod 0755 "${wrapper_path}"
+}
+
 install_and_run_vless_project() {
   local app_name="vless-xhttp-reality-self"
   local repo="${VLESS_PROJECT_REPO:-tao-t356/vless-xhttp-reality-self}"
@@ -804,6 +926,11 @@ install_and_run_vless_project() {
   for bin_file in "${tmp}/bin/"*; do
     [ -f "${bin_file}" ] || continue
     bin_name="$(basename "${bin_file}")"
+    if [ "${bin_name}" = "${app_name}-install-ip" ]; then
+      install -m 0755 "${bin_file}" "${install_dir}/${bin_name}.real"
+      write_vless_project_install_ip_wrapper "${install_dir}/${bin_name}" "${install_dir}/${bin_name}.real"
+      continue
+    fi
     install -m 0755 "${bin_file}" "${install_dir}/${bin_name}"
   done
 

@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.13.9`
+- TaoBox VPS Toolbox：`v0.14.0`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -115,6 +115,7 @@ f
 
 TaoBox 会直接下载上游公开包并校验 SHA256，避免上游安装器二次访问 `raw.githubusercontent.com` 时命中旧缓存。
 下载后会安装发布包内全部 `bin/` 文件，因此上游 `v0.19.32` 新增的免域名 sidecar（例如 `vless-xhttp-reality-self-install-ip`）会随主程序一起升级。
+TaoBox 会把免域名 sidecar 包装成兼容入口：上游原文件保存在 `.real`，入口负责在系统 `python3-venv` 依赖异常时绕过坏掉的 apt 依赖并准备 `certbot-ip`，避免上游升级或 VPS 源混用时直接中断菜单。
 如果上游 `main` 包下载、校验或基础结构检查失败，TaoBox 会自动回退到 `80ad369`；也可以通过 `VLESS_PROJECT_DIST_REF=<ref>` 临时指定上游 ref。
 安装完成后会进入项目菜单。进入该菜单后，TaoBox 也会把旧的 `/usr/local/bin/vless-xhttp-reality-self.sh` 刷新成兼容入口，避免误跑旧脚本时仍停留在旧版本。
 
