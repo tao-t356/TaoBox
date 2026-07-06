@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.13.7"
+TOOLBOX_VERSION="0.13.8"
 DEFAULT_JSHOOK="123"
 VLESS_PROJECT_DEFAULT_DIST_REF="${VLESS_PROJECT_DEFAULT_DIST_REF:-main}"
 VLESS_PROJECT_FALLBACK_DIST_REF="${VLESS_PROJECT_FALLBACK_DIST_REF:-80ad369}"
@@ -1016,14 +1016,6 @@ option_install_xanmod() {
   say "推荐安装包: ${package_name}"
   say "说明: XanMod 官方当前包含并默认启用 BBRv3（名称显示为 bbr）。"
   say "安装完成后通常需要重启服务器。"
-  prompt_read -p "确认继续？[Y/n]: " confirm
-  case "${confirm}" in
-    ""|y|Y) ;;
-    *)
-      warn "已取消。"
-      return 0
-      ;;
-  esac
 
   jshook="$(get_effective_jshook)"
 
@@ -1040,7 +1032,8 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get install -y ca-certificates curl wget gnupg lsb-release
 fi
 
-curl -fsSL -H "jshook: ${jshook}" https://dl.xanmod.org/archive.key | gpg --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg
+rm -f /etc/apt/keyrings/xanmod-archive-keyring.gpg
+curl -fsSL -H "jshook: ${jshook}" https://dl.xanmod.org/archive.key | gpg --batch --yes --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg
 if ! curl -fsI "https://deb.xanmod.org/dists/${codename}/Release" >/dev/null 2>&1 \
   && ! curl -fsI "http://deb.xanmod.org/dists/${codename}/Release" >/dev/null 2>&1; then
   echo "XanMod APT 仓库当前不提供 ${codename} Release。"
