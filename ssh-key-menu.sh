@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.13.3"
+TOOLBOX_VERSION="0.13.4"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -537,7 +537,7 @@ option_vless_project_info() {
   say "仓库: https://github.com/tao-t356/vless-xhttp-reality-self"
   say "用途: Debian / Ubuntu 上菜单式部署 VLESS + XHTTP + REALITY + Hysteria2"
   say "要求: root、域名已解析、80/443 可用"
-  say "运行方式: 会从 GitHub 拉取 install.sh，安装最新 Release 二进制并进入菜单"
+  say "运行方式: 会从 GitHub Contents API 拉取 main/dist 公开包，安装后进入菜单"
   say "--------------------------------------------------"
 }
 
@@ -646,6 +646,140 @@ EOF
   fi
 }
 
+detect_vless_project_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    armv7l|armv7) printf 'armv7' ;;
+    *)
+      err "暂不支持当前 CPU 架构: $(uname -m)"
+      return 1
+      ;;
+  esac
+}
+
+download_vless_project_asset() {
+  local repo="$1"
+  local asset="$2"
+  local output="$3"
+  local jshook="$4"
+  local api_url="https://api.github.com/repos/${repo}/contents/dist/${asset}?ref=main&ts=$(date +%s)"
+  local raw_url="https://raw.githubusercontent.com/${repo}/main/dist/${asset}?ts=$(date +%s)"
+
+  if have_cmd curl; then
+    curl -fsSL \
+      -H "Accept: application/vnd.github.raw" \
+      -H "Cache-Control: no-cache" \
+      -H "jshook: ${jshook}" \
+      "${api_url}" -o "${output}" \
+      || curl -fsSL \
+        -H "Cache-Control: no-cache" \
+        -H "jshook: ${jshook}" \
+        "${raw_url}" -o "${output}"
+  elif have_cmd wget; then
+    wget -qO "${output}" \
+      --header="Accept: application/vnd.github.raw" \
+      --header="Cache-Control: no-cache" \
+      --header="jshook: ${jshook}" \
+      "${api_url}" \
+      || wget -qO "${output}" \
+        --header="Cache-Control: no-cache" \
+        --header="jshook: ${jshook}" \
+        "${raw_url}"
+  else
+    err "需要 curl 或 wget 其中一个命令。"
+    return 1
+  fi
+}
+
+install_and_run_vless_project() {
+  local app_name="vless-xhttp-reality-self"
+  local repo="${VLESS_PROJECT_REPO:-tao-t356/vless-xhttp-reality-self}"
+  local install_dir="${VLESS_PROJECT_INSTALL_DIR:-/usr/local/bin}"
+  local jshook=""
+  local arch=""
+  local asset=""
+  local tmp=""
+  local archive=""
+  local checksum_file=""
+  local version_text=""
+  local legacy_helper=""
+  local rc=0
+
+  if [ "$(id -u)" -ne 0 ]; then
+    err "${app_name} 建议使用 root 运行。"
+    return 1
+  fi
+  if ! printf '%s' "${repo}" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    err "VLESS_PROJECT_REPO 格式错误，应为 owner/repo: ${repo}"
+    return 1
+  fi
+  require_cmd tar || return 1
+  require_cmd install || return 1
+
+  arch="$(detect_vless_project_arch)" || return 1
+  asset="${app_name}_linux_${arch}.tar.gz"
+  jshook="$(get_effective_jshook)"
+  tmp="$(mktemp -d)"
+  archive="${tmp}/${asset}"
+  checksum_file="${tmp}/${asset}.sha256"
+
+  say "正在下载 ${app_name} 公开 dist 包: linux/${arch}"
+  if ! download_vless_project_asset "${repo}" "${asset}" "${archive}" "${jshook}"; then
+    rm -rf "${tmp}"
+    err "下载失败: dist/${asset}"
+    return 1
+  fi
+
+  if download_vless_project_asset "${repo}" "${asset}.sha256" "${checksum_file}" "${jshook}" 2>/dev/null; then
+    if have_cmd sha256sum; then
+      if ! (cd "${tmp}" && sha256sum -c "${asset}.sha256"); then
+        rm -rf "${tmp}"
+        err "SHA256 校验失败，已停止安装。"
+        return 1
+      fi
+    else
+      warn "未找到 sha256sum，跳过 SHA256 校验。"
+    fi
+  else
+    warn "未找到校验文件 ${asset}.sha256，跳过 SHA256 校验。"
+  fi
+
+  if ! tar -xzf "${archive}" -C "${tmp}"; then
+    rm -rf "${tmp}"
+    err "解压失败: ${asset}"
+    return 1
+  fi
+  if [ ! -x "${tmp}/bin/${app_name}" ]; then
+    rm -rf "${tmp}"
+    err "发布包缺少 bin/${app_name}"
+    return 1
+  fi
+
+  install -d -m 0755 "${install_dir}"
+  install -m 0755 "${tmp}/bin/${app_name}" "${install_dir}/${app_name}"
+  if [ -x "${tmp}/bin/${app_name}-egress-pool" ]; then
+    install -m 0755 "${tmp}/bin/${app_name}-egress-pool" "${install_dir}/${app_name}-egress-pool"
+  fi
+  legacy_helper="${app_name}-$(printf '\166\160\156\147\141\164\145\055\164\157\160\062\060')"
+  if [ -x "${tmp}/bin/${legacy_helper}" ]; then
+    install -m 0755 "${tmp}/bin/${legacy_helper}" "${install_dir}/${legacy_helper}"
+    if [ ! -x "${install_dir}/${app_name}-egress-pool" ]; then
+      install -m 0755 "${tmp}/bin/${legacy_helper}" "${install_dir}/${app_name}-egress-pool"
+    fi
+  fi
+  if [ -r "${tmp}/VERSION" ]; then
+    version_text="$(cat "${tmp}/VERSION" 2>/dev/null || true)"
+  fi
+  rm -rf "${tmp}"
+
+  ok "安装完成: ${install_dir}/${app_name}${version_text:+ (${version_text})}"
+  refresh_vless_project_legacy_launcher
+  printf '\n'
+  RELEASE_REPO="${repo}" VXR_RELEASE_VERSION="latest" run_with_tty "${install_dir}/${app_name}" menu || rc=$?
+  return "${rc}"
+}
+
 option_run_taobox_speed() {
   if [ -r /etc/os-release ]; then
     . /etc/os-release
@@ -691,14 +825,15 @@ option_run_vless_project() {
     esac
   fi
 
-  say "即将安装 / 更新 vless-xhttp-reality-self 最新 Release 并进入项目菜单。"
-  say "- 安装入口: https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh"
+  say "即将安装 / 更新 vless-xhttp-reality-self 公开 dist 包并进入项目菜单。"
+  say "- 下载来源: https://api.github.com/repos/tao-t356/vless-xhttp-reality-self/contents/dist"
   say "- 二进制路径: /usr/local/bin/vless-xhttp-reality-self"
 
-  run_remote_installer \
-    "vless-xhttp-reality-self" \
-    "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh" \
-    "它会安装最新 Release 二进制并打开项目菜单。"
+  local rc=0
+  install_and_run_vless_project || rc=$?
+  printf '\n'
+  prompt_read -p "按回车返回工具箱..." _
+  return "${rc}"
 }
 
 option_npm_docker_info() {
