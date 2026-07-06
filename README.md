@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.13.6`
+- TaoBox VPS Toolbox：`v0.13.7`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -156,6 +156,8 @@ Nginx Proxy Manager 安装脚本来自：
 - Cloudflare WARP（补齐双栈 IPv4/IPv6、全局出站、socks5 分流、WARP+）
 - 安装 XanMod 内核（内置并默认启用 BBRv3，需 x86_64 + Debian/Ubuntu，装完需重启）
 - 查看 XanMod / BBRv3 状态（内核、CPU psABI 等级、拥塞控制算法）
+
+XanMod APT 源使用官方系统代号 suite。安装前会清理旧的 `/etc/apt/sources.list.d/xanmod-release.list`，并先检查 `https://deb.xanmod.org/dists/<codename>/Release` 是否存在；如果当前系统代号（例如 Ubuntu 22.04 的 `jammy`）已不在 XanMod APT 仓库中，会给出明确提示而不是留下坏源导致 `apt update` 失败。
 
 WARP 通过委托上游 fscarmen WARP 菜单实现，进入后由该菜单选择双栈 / 全局 / socks5 等模式。默认下载来源：
 
