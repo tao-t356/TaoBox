@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.15.1"
+TOOLBOX_VERSION="0.15.2"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -2880,8 +2880,8 @@ option_add_realm_rule() {
     err "目标端口必须是 1-65535。"
     return 1
   fi
-  prompt_read -p "协议 [1=TCP, 2=UDP, 3=TCP+UDP，默认 1]: " protocol_choice
-  case "${protocol_choice:-1}" in
+  prompt_read -p "协议 [1=TCP, 2=UDP, 3=TCP+UDP，默认 3]: " protocol_choice
+  case "${protocol_choice:-3}" in
     1|tcp|TCP) protocol="tcp" ;;
     2|udp|UDP) protocol="udp" ;;
     3|both|BOTH) protocol="both" ;;
@@ -2912,6 +2912,15 @@ option_add_realm_rule() {
 
 option_list_realm_rules() {
   local count=0
+  local index=0
+  local name=""
+  local enabled=""
+  local listen_host=""
+  local listen_port=""
+  local remote_host=""
+  local remote_port=""
+  local protocol=""
+  local state=""
   count="$(realm_rules_record_count)"
   say "${C_BOLD}${C_CYAN}Realm 转发规则${C_RESET}"
   print_divider
@@ -2919,17 +2928,16 @@ option_list_realm_rules() {
     warn "当前没有转发规则。"
     return 0
   fi
-  printf '%-4s %-20s %-8s %-24s %-28s %-9s\n' "序号" "名称" "状态" "监听" "目标" "协议"
-  awk -F '\t' '
-    NF >= 7 && $1 !~ /^#/ {
-      n++
-      state=($2 == "1" ? "启用" : "停用")
-      proto=($7 == "tcp" ? "TCP" : ($7 == "udp" ? "UDP" : "TCP+UDP"))
-      listen=$3 ":" $4
-      remote=$5 ":" $6
-      printf "%-4d %-20s %-8s %-24s %-28s %-9s\n", n, $1, state, listen, remote, proto
-    }
-  ' "${REALM_RULES_FILE}"
+  while IFS=$'\t' read -r name enabled listen_host listen_port remote_host remote_port protocol; do
+    [ -n "${name}" ] || continue
+    case "${name}" in \#*) continue ;; esac
+    index=$((index + 1))
+    if [ "${enabled}" = "1" ]; then state="启用"; else state="停用"; fi
+    printf '[%d] %s  [%s]  [%s]\n' "${index}" "${name}" "${state}" "$(realm_protocol_label "${protocol}")"
+    say "    监听: $(format_realm_address "${listen_host}" "${listen_port}")"
+    say "    目标: $(format_realm_address "${remote_host}" "${remote_port}")"
+    [ "${index}" -ge "${count}" ] || printf '\n'
+  done < "${REALM_RULES_FILE}"
   print_divider
 }
 
