@@ -120,10 +120,8 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.14.0"
+TOOLBOX_VERSION="0.14.1"
 DEFAULT_JSHOOK="123"
-VLESS_PROJECT_DEFAULT_DIST_REF="${VLESS_PROJECT_DEFAULT_DIST_REF:-main}"
-VLESS_PROJECT_FALLBACK_DIST_REF="${VLESS_PROJECT_FALLBACK_DIST_REF:-80ad369}"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
 SSH_DIR="${CURRENT_HOME}/.ssh"
@@ -651,9 +649,9 @@ option_vless_project_info() {
   say "${C_BOLD}${C_CYAN}vless-xhttp-reality-self${C_RESET}"
   say "--------------------------------------------------"
   say "仓库: https://github.com/tao-t356/vless-xhttp-reality-self"
-  say "用途: Debian / Ubuntu 上菜单式部署 VLESS + XHTTP + REALITY + Hysteria2"
-  say "要求: root、域名已解析、80/443 可用"
-  say "运行方式: 会从 GitHub Contents API 拉取 main/dist 公开包，安装后进入菜单"
+  say "用途: 启动上游最新安装、更新和管理菜单"
+  say "要求: root、Linux amd64；具体要求以上游菜单为准"
+  say "运行方式: 每次直接下载并执行上游 main/install.sh，自动跟随上游更新"
   say "--------------------------------------------------"
 }
 
@@ -666,12 +664,17 @@ run_remote_installer() {
   local jshook=""
   local tmp_file=""
   local download_url=""
+  local fallback_url=""
+  local download_tool=""
+  local download_ok=0
   local old_taobox_preset_domain="${TAOBOX_PRESET_DOMAIN-}"
   local had_taobox_preset_domain=0
 
   if [ "$(id -u)" -ne 0 ]; then
     err "${project_name} 建议使用 root 运行。"
-    return 1
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
   fi
 
   jshook="$(get_effective_jshook)"
@@ -689,26 +692,84 @@ run_remote_installer() {
       ;;
   esac
 
-  tmp_file="$(mktemp)"
+  if [ "${download_url}" != "${project_url}" ]; then
+    fallback_url="${project_url}"
+    case "${fallback_url}" in
+      *\?*) fallback_url="${fallback_url}&ts=$(date +%s)" ;;
+      *) fallback_url="${fallback_url}?ts=$(date +%s)" ;;
+    esac
+  fi
+
+  if ! tmp_file="$(mktemp)"; then
+    err "无法创建临时文件。"
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
+  fi
   if have_cmd curl; then
+    download_tool="curl"
     if printf '%s' "${download_url}" | grep -q '^https://api.github.com/repos/'; then
-      curl -fsSL -H "Accept: application/vnd.github.raw" -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${download_url}" -o "${tmp_file}"
+      if curl -fsSL -H "Accept: application/vnd.github.raw" -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${download_url}" -o "${tmp_file}"; then
+        download_ok=1
+      fi
     else
-      curl -fsSL -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${download_url}" -o "${tmp_file}"
+      if curl -fsSL -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${download_url}" -o "${tmp_file}"; then
+        download_ok=1
+      fi
     fi
   elif have_cmd wget; then
+    download_tool="wget"
     if printf '%s' "${download_url}" | grep -q '^https://api.github.com/repos/'; then
-      wget -qO "${tmp_file}" --header="Accept: application/vnd.github.raw" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${download_url}"
+      if wget -qO "${tmp_file}" --header="Accept: application/vnd.github.raw" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${download_url}"; then
+        download_ok=1
+      fi
     else
-      wget -qO "${tmp_file}" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${download_url}"
+      if wget -qO "${tmp_file}" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${download_url}"; then
+        download_ok=1
+      fi
     fi
   else
     err "需要 curl 或 wget 其中一个命令。"
     rm -f "${tmp_file}"
-    return 1
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
   fi
 
-  chmod +x "${tmp_file}"
+  if [ "${download_ok}" -eq 1 ]; then
+    if [ ! -s "${tmp_file}" ] || ! bash -n "${tmp_file}" >/dev/null 2>&1; then
+      warn "主下载地址返回的脚本内容无效。"
+      download_ok=0
+    fi
+  fi
+
+  if [ "${download_ok}" -ne 1 ] && [ -n "${fallback_url}" ]; then
+    warn "GitHub API 下载失败或内容无效，改用上游 raw 地址重试。"
+    download_ok=0
+    if [ "${download_tool}" = "curl" ]; then
+      if curl -fsSL -H "Cache-Control: no-cache" -H "jshook: ${jshook}" "${fallback_url}" -o "${tmp_file}"; then
+        download_ok=1
+      fi
+    else
+      if wget -qO "${tmp_file}" --header="Cache-Control: no-cache" --header="jshook: ${jshook}" "${fallback_url}"; then
+        download_ok=1
+      fi
+    fi
+    if [ "${download_ok}" -eq 1 ]; then
+      if [ ! -s "${tmp_file}" ] || ! bash -n "${tmp_file}" >/dev/null 2>&1; then
+        download_ok=0
+      fi
+    fi
+  fi
+
+  if [ "${download_ok}" -ne 1 ]; then
+    err "下载到的 ${project_name} 安装脚本不可用，已停止执行。"
+    rm -f "${tmp_file}"
+    printf '\n'
+    prompt_read -p "按回车返回工具箱..." _
+    return 0
+  fi
+
   local rc=0
   if [ "${TAOBOX_PRESET_DOMAIN+x}" = "x" ]; then
     had_taobox_preset_domain=1
@@ -734,9 +795,12 @@ run_remote_installer() {
   fi
 
   rm -f "${tmp_file}"
+  if [ "${rc}" -ne 0 ]; then
+    warn "${project_name} 已退出，返回码: ${rc}"
+  fi
   printf '\n'
   prompt_read -p "按回车返回工具箱..." _
-  return "${rc}"
+  return 0
 }
 
 refresh_vless_project_legacy_launcher() {
@@ -762,309 +826,6 @@ EOF
   fi
 }
 
-detect_vless_project_arch() {
-  case "$(uname -m)" in
-    x86_64|amd64) printf 'amd64' ;;
-    aarch64|arm64) printf 'arm64' ;;
-    armv7l|armv7) printf 'armv7' ;;
-    *)
-      err "暂不支持当前 CPU 架构: $(uname -m)"
-      return 1
-      ;;
-  esac
-}
-
-download_vless_project_asset() {
-  local repo="$1"
-  local ref="$2"
-  local asset="$3"
-  local output="$4"
-  local jshook="$5"
-  local api_url="https://api.github.com/repos/${repo}/contents/dist/${asset}?ref=${ref}&ts=$(date +%s)"
-  local raw_url="https://raw.githubusercontent.com/${repo}/${ref}/dist/${asset}?ts=$(date +%s)"
-
-  if have_cmd curl; then
-    curl -fsSL \
-      -H "Accept: application/vnd.github.raw" \
-      -H "Cache-Control: no-cache" \
-      -H "jshook: ${jshook}" \
-      "${api_url}" -o "${output}" \
-      || curl -fsSL \
-        -H "Cache-Control: no-cache" \
-        -H "jshook: ${jshook}" \
-        "${raw_url}" -o "${output}"
-  elif have_cmd wget; then
-    wget -qO "${output}" \
-      --header="Accept: application/vnd.github.raw" \
-      --header="Cache-Control: no-cache" \
-      --header="jshook: ${jshook}" \
-      "${api_url}" \
-      || wget -qO "${output}" \
-        --header="Cache-Control: no-cache" \
-        --header="jshook: ${jshook}" \
-        "${raw_url}"
-  else
-    err "需要 curl 或 wget 其中一个命令。"
-    return 1
-  fi
-}
-
-write_vless_project_install_ip_wrapper() {
-  local wrapper_path="$1"
-  local real_path="$2"
-
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf 'set -Eeuo pipefail\n'
-    printf 'VXR_INSTALL_IP_REAL=%q\n' "${real_path}"
-    cat <<'EOF'
-
-vxr_log() {
-  printf '%s\n' "$*"
-}
-
-vxr_warn() {
-  printf 'WARN: %s\n' "$*" >&2
-}
-
-vxr_have_cmd() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-vxr_certbot_supports_ip() {
-  local certbot_bin="${1:-}"
-  [ -x "${certbot_bin}" ] || return 1
-  "${certbot_bin}" certonly --help all 2>/dev/null | grep -q -- "--ip-address"
-}
-
-vxr_python_venv_install_simulation_ok() {
-  vxr_have_cmd apt-get || return 0
-  DEBIAN_FRONTEND=noninteractive apt-get install -s python3-pip python3-venv >/dev/null 2>&1
-}
-
-vxr_download_virtualenv_pyz() {
-  local output="$1"
-  local url="${VXR_VIRTUALENV_PYZ_URL:-https://bootstrap.pypa.io/virtualenv.pyz}"
-
-  if vxr_have_cmd curl; then
-    curl -fsSL "${url}" -o "${output}"
-  elif vxr_have_cmd wget; then
-    wget -qO "${output}" "${url}"
-  else
-    return 1
-  fi
-}
-
-vxr_bootstrap_certbot_ip_without_apt_venv() {
-  local certbot_bin="${HY2_CERTBOT_BIN:-/usr/local/bin/certbot-ip}"
-  local certbot_venv="${HY2_CERTBOT_VENV:-/opt/certbot-ip}"
-  local tmp=""
-  local pyz=""
-
-  vxr_have_cmd python3 || return 1
-  tmp="$(mktemp -d)" || return 1
-  pyz="${tmp}/virtualenv.pyz"
-
-  if ! vxr_download_virtualenv_pyz "${pyz}"; then
-    rm -rf "${tmp}"
-    return 1
-  fi
-  if ! python3 "${pyz}" --clear "${certbot_venv}"; then
-    rm -rf "${tmp}"
-    return 1
-  fi
-  rm -rf "${tmp}"
-
-  "${certbot_venv}/bin/python" -m pip install --upgrade pip setuptools wheel
-  "${certbot_venv}/bin/python" -m pip install --upgrade certbot
-  install -d "$(dirname "${certbot_bin}")"
-  ln -sf "${certbot_venv}/bin/certbot" "${certbot_bin}"
-  vxr_certbot_supports_ip "${certbot_bin}"
-}
-
-vxr_print_python_venv_hint() {
-  vxr_warn "python3-venv 依赖不可用，通常是系统源混用、Python 包版本不一致或软件包被 hold。"
-  vxr_warn "可在 VPS 上检查：apt-cache policy python3 python3-venv python3.12 python3.12-venv"
-  vxr_warn "再检查：apt-mark showhold"
-  if vxr_have_cmd apt-cache; then
-    printf '\nAPT policy:\n' >&2
-    apt-cache policy python3 python3-venv python3.12 python3.12-venv 2>/dev/null >&2 || true
-  fi
-  if vxr_have_cmd apt-mark; then
-    printf '\nHeld packages:\n' >&2
-    apt-mark showhold 2>/dev/null >&2 || true
-  fi
-}
-
-vxr_main() {
-  local cert_mode="${HY2_CERT_MODE:-auto}"
-  local certbot_bin="${HY2_CERTBOT_BIN:-/usr/local/bin/certbot-ip}"
-
-  [ -x "${VXR_INSTALL_IP_REAL}" ] || {
-    vxr_warn "缺少上游免域名安装器: ${VXR_INSTALL_IP_REAL}"
-    exit 127
-  }
-
-  case "${cert_mode}" in
-    auto|"") ;;
-    *) exec "${VXR_INSTALL_IP_REAL}" "$@" ;;
-  esac
-
-  if vxr_certbot_supports_ip "${certbot_bin}" || vxr_python_venv_install_simulation_ok; then
-    exec "${VXR_INSTALL_IP_REAL}" "$@"
-  fi
-
-  vxr_warn "检测到 python3-venv 依赖异常，改用 TaoBox 兼容方式准备 certbot-ip。"
-  if vxr_bootstrap_certbot_ip_without_apt_venv; then
-    vxr_log "已准备 certbot-ip: ${certbot_bin}"
-    exec "${VXR_INSTALL_IP_REAL}" "$@"
-  fi
-
-  vxr_print_python_venv_hint
-  exit 100
-}
-
-vxr_main "$@"
-EOF
-  } > "${wrapper_path}" || return 1
-
-  chmod 0755 "${wrapper_path}"
-}
-
-install_and_run_vless_project() {
-  local app_name="vless-xhttp-reality-self"
-  local repo="${VLESS_PROJECT_REPO:-tao-t356/vless-xhttp-reality-self}"
-  local requested_dist_ref="${VLESS_PROJECT_DIST_REF:-}"
-  local install_dir="${VLESS_PROJECT_INSTALL_DIR:-/usr/local/bin}"
-  local jshook=""
-  local arch=""
-  local asset=""
-  local tmp=""
-  local archive=""
-  local checksum_file=""
-  local dist_ref=""
-  local dist_refs=""
-  local selected_ref=""
-  local version_text=""
-  local bin_file=""
-  local bin_name=""
-  local legacy_helper=""
-  local rc=0
-
-  if [ "$(id -u)" -ne 0 ]; then
-    err "${app_name} 建议使用 root 运行。"
-    return 1
-  fi
-  if ! printf '%s' "${repo}" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
-    err "VLESS_PROJECT_REPO 格式错误，应为 owner/repo: ${repo}"
-    return 1
-  fi
-  require_cmd tar || return 1
-  require_cmd install || return 1
-
-  arch="$(detect_vless_project_arch)" || return 1
-  asset="${app_name}_linux_${arch}.tar.gz"
-  jshook="$(get_effective_jshook)"
-  if [ -n "${requested_dist_ref}" ]; then
-    dist_refs="${requested_dist_ref}"
-  else
-    dist_refs="${VLESS_PROJECT_DEFAULT_DIST_REF}"
-    if [ "${VLESS_PROJECT_FALLBACK_DIST_REF}" != "${VLESS_PROJECT_DEFAULT_DIST_REF}" ]; then
-      dist_refs="${dist_refs} ${VLESS_PROJECT_FALLBACK_DIST_REF}"
-    fi
-  fi
-
-  for dist_ref in ${dist_refs}; do
-    if ! printf '%s' "${dist_ref}" | grep -Eq '^[A-Za-z0-9_.-]+$'; then
-      err "VLESS_PROJECT_DIST_REF 格式错误: ${dist_ref}"
-      rm -rf "${tmp:-}"
-      return 1
-    fi
-
-    rm -rf "${tmp:-}"
-    tmp="$(mktemp -d)"
-    archive="${tmp}/${asset}"
-    checksum_file="${tmp}/${asset}.sha256"
-
-    say "正在下载 ${app_name} 公开 dist 包: ${dist_ref} linux/${arch}"
-    if ! download_vless_project_asset "${repo}" "${dist_ref}" "${asset}" "${archive}" "${jshook}"; then
-      warn "下载失败: ${dist_ref}/dist/${asset}"
-      continue
-    fi
-
-    if download_vless_project_asset "${repo}" "${dist_ref}" "${asset}.sha256" "${checksum_file}" "${jshook}" 2>/dev/null; then
-      if have_cmd sha256sum; then
-        if ! (cd "${tmp}" && sha256sum -c "${asset}.sha256"); then
-          warn "SHA256 校验失败: ${dist_ref}"
-          continue
-        fi
-      else
-        warn "未找到 sha256sum，跳过 SHA256 校验。"
-      fi
-    else
-      warn "未找到校验文件 ${asset}.sha256，跳过 SHA256 校验。"
-    fi
-
-    if ! tar -xzf "${archive}" -C "${tmp}"; then
-      warn "解压失败: ${dist_ref}/dist/${asset}"
-      continue
-    fi
-    if [ ! -x "${tmp}/bin/${app_name}" ]; then
-      warn "发布包缺少 bin/${app_name}: ${dist_ref}"
-      continue
-    fi
-
-    version_text=""
-    if [ -r "${tmp}/VERSION" ]; then
-      version_text="$(cat "${tmp}/VERSION" 2>/dev/null || true)"
-    fi
-    if [ -z "${requested_dist_ref}" ] && [ "${dist_ref}" != "${VLESS_PROJECT_FALLBACK_DIST_REF}" ]; then
-      if "${tmp}/bin/${app_name}" --help 2>/dev/null | grep -Eiq 'No-domain|免域名' \
-        && [ ! -x "${tmp}/bin/${app_name}-install-ip" ]; then
-        warn "上游 ${version_text:-${dist_ref}} 缺少免域名 sidecar，切换到稳定回退包。"
-        continue
-      fi
-    fi
-
-    selected_ref="${dist_ref}"
-    break
-  done
-
-  if [ -z "${selected_ref}" ]; then
-    rm -rf "${tmp:-}"
-    err "未能取得可用的 ${app_name} 公开 dist 包。"
-    return 1
-  fi
-
-  install -d -m 0755 "${install_dir}"
-  for bin_file in "${tmp}/bin/"*; do
-    [ -f "${bin_file}" ] || continue
-    bin_name="$(basename "${bin_file}")"
-    if [ "${bin_name}" = "${app_name}-install-ip" ]; then
-      install -m 0755 "${bin_file}" "${install_dir}/${bin_name}.real"
-      write_vless_project_install_ip_wrapper "${install_dir}/${bin_name}" "${install_dir}/${bin_name}.real"
-      continue
-    fi
-    install -m 0755 "${bin_file}" "${install_dir}/${bin_name}"
-  done
-
-  if [ ! -x "${install_dir}/${app_name}" ]; then
-    rm -rf "${tmp}"
-    err "安装后缺少 ${install_dir}/${app_name}"
-    return 1
-  fi
-  legacy_helper="${app_name}-$(printf '\166\160\156\147\141\164\145\055\164\157\160\062\060')"
-  if [ -x "${tmp}/bin/${legacy_helper}" ] && [ ! -x "${install_dir}/${app_name}-egress-pool" ]; then
-    install -m 0755 "${tmp}/bin/${legacy_helper}" "${install_dir}/${app_name}-egress-pool"
-  fi
-  rm -rf "${tmp}"
-
-  ok "安装完成: ${install_dir}/${app_name}${version_text:+ (${version_text})}"
-  refresh_vless_project_legacy_launcher
-  printf '\n'
-  RELEASE_REPO="${repo}" VXR_RELEASE_VERSION="${selected_ref}" run_with_tty "${install_dir}/${app_name}" menu || rc=$?
-  return "${rc}"
-}
 
 option_run_taobox_speed() {
   if [ -r /etc/os-release ]; then
@@ -1111,17 +872,13 @@ option_run_vless_project() {
     esac
   fi
 
-  say "即将安装 / 更新 vless-xhttp-reality-self 最新公开 dist 包并进入项目菜单。"
-  say "- 下载来源: https://api.github.com/repos/tao-t356/vless-xhttp-reality-self/contents/dist"
-  say "- 默认 ref: ${VLESS_PROJECT_DEFAULT_DIST_REF}；失败时回退: ${VLESS_PROJECT_FALLBACK_DIST_REF}"
-  say "- 会安装包内全部 bin/ sidecar，免域名入口可随上游升级"
-  say "- 二进制路径: /usr/local/bin/vless-xhttp-reality-self"
-
-  local rc=0
-  install_and_run_vless_project || rc=$?
+  say "即将直接运行 vless-xhttp-reality-self 上游最新安装脚本。"
+  say "- 上游命令: bash <(curl -fsSL https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh)"
+  say "- TaoBox 仅负责可靠下载、TTY 交互和旧命令兼容，不再固定 dist 版本"
   printf '\n'
-  prompt_read -p "按回车返回工具箱..." _
-  return "${rc}"
+  run_remote_installer \
+    "vless-xhttp-reality-self" \
+    "https://raw.githubusercontent.com/tao-t356/vless-xhttp-reality-self/main/install.sh"
 }
 
 option_npm_docker_info() {
