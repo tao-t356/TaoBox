@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.15.0"
+TOOLBOX_VERSION="0.15.1"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -2503,6 +2503,7 @@ realm_apply_rules_file() {
   local had_rules=0
   local had_config=0
   local enabled_count=0
+  local write_failed=0
 
   if [ ! -x "${REALM_BIN}" ] || [ ! -f "${REALM_SERVICE}" ]; then
     err "Realm 尚未安装，请先选择安装 / 更新 Realm。"
@@ -2522,10 +2523,18 @@ realm_apply_rules_file() {
   fi
 
   realm_build_config "${new_rules}" "${tmp_config}"
-  if ! run_root install -d -m 0755 "${REALM_DIR}" \
-    || ! run_root install -m 0644 "${new_rules}" "${REALM_RULES_FILE}" \
-    || ! run_root install -m 0644 "${tmp_config}" "${REALM_CONFIG}" \
-    || ! run_root systemctl daemon-reload; then
+  if ! run_root install -d -m 0755 "${REALM_DIR}"; then
+    write_failed=1
+  elif [ "${new_rules}" != "${REALM_RULES_FILE}" ] \
+    && ! run_root install -m 0644 "${new_rules}" "${REALM_RULES_FILE}"; then
+    write_failed=1
+  elif ! run_root install -m 0644 "${tmp_config}" "${REALM_CONFIG}"; then
+    write_failed=1
+  elif ! run_root systemctl daemon-reload; then
+    write_failed=1
+  fi
+
+  if [ "${write_failed}" -ne 0 ]; then
     err "写入 Realm 配置失败。"
     realm_restore_previous_files "${had_rules}" "${old_rules}" "${had_config}" "${old_config}"
     rm -f "${tmp_config}" "${old_rules}" "${old_config}"
