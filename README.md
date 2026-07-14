@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.15.2`
+- TaoBox VPS Toolbox：`v0.15.3`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -152,6 +152,7 @@ Nginx Proxy Manager 安装脚本来自：
 
 - 支持 TCP、UDP、TCP+UDP，以及 IPv4 / IPv6 监听和目标地址。
 - 新建规则默认选择 TCP+UDP；规则列表使用适合窄终端的多行布局，避免中文宽字符和长地址造成错位。
+- Realm 状态页会高亮显示服务和开机启动状态，并强制启用 systemd 状态颜色。
 - Realm 使用官方最新 Linux musl 二进制，当前支持 x86_64、aarch64、armv7 和 arm。
 - 规则保存在 `/etc/realm/taobox-rules.tsv`，运行配置生成到 `/etc/realm/config.toml`。
 - 每次增删或启停规则都会原子写入配置；Realm 重启失败时会自动回滚修改前的规则。

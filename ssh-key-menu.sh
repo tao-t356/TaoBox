@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.15.2"
+TOOLBOX_VERSION="0.15.3"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -2915,6 +2915,8 @@ option_delete_realm_rule() {
 option_realm_status() {
   local service_state=""
   local enabled_state=""
+  local service_color="${C_YELLOW}"
+  local enabled_color="${C_YELLOW}"
   say "${C_BOLD}${C_CYAN}Realm 状态${C_RESET}"
   print_divider
   if [ -x "${REALM_BIN}" ]; then
@@ -2925,12 +2927,20 @@ option_realm_status() {
   fi
   service_state="$(systemctl is-active realm 2>/dev/null || true)"
   enabled_state="$(systemctl is-enabled realm 2>/dev/null || true)"
+  case "${service_state}" in
+    active) service_color="${C_GREEN}" ;;
+    failed|inactive) service_color="${C_RED}" ;;
+  esac
+  case "${enabled_state}" in
+    enabled) enabled_color="${C_GREEN}" ;;
+    disabled|masked) enabled_color="${C_RED}" ;;
+  esac
   say "规则总数: $(realm_rules_record_count)"
   say "启用规则: $(realm_enabled_rule_count)"
-  say "服务状态: ${service_state:-inactive}"
-  say "开机启动: ${enabled_state:-disabled}"
+  printf '服务状态: %s%s%s\n' "${service_color}" "${service_state:-inactive}" "${C_RESET}"
+  printf '开机启动: %s%s%s\n' "${enabled_color}" "${enabled_state:-disabled}" "${C_RESET}"
   print_divider
-  systemctl --no-pager --full status realm 2>/dev/null || true
+  SYSTEMD_COLORS=1 SYSTEMD_URLIFY=0 systemctl --no-pager --full status realm 2>/dev/null || true
 }
 
 option_realm_logs() {
