@@ -1,12 +1,12 @@
 # TaoBox
 
-TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、多协议脚本集成、TCP/BBR 调优、Docker + Nginx Proxy Manager、网络诊断、系统工具和自更新能力。
+TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安装到服务器本地，并提供 SSH 登录管理、多协议脚本集成、Realm 端口转发、TCP/BBR 调优、Docker + Nginx Proxy Manager、网络诊断、系统工具和自更新能力。
 
 当前主线更偏向「登录 VPS 后直接用菜单完成常用运维与节点部署」，仓库中仍保留早期的 Ansible / SSH 配置生成文件，适合需要批量管理多台 VPS 的场景。
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.14.1`
+- TaoBox VPS Toolbox：`v0.15.0`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -65,9 +65,10 @@ f
 1. SSH 登录管理
 2. 多协议脚本
 3. Docker + NPM 安装 / 容器管理
-4. 网络工具 / BBR
-5. 系统工具 / DD
-6. 更新工具箱
+4. 端口转发 / Realm
+5. 网络工具 / BBR
+6. 系统工具 / DD
+7. 更新工具箱
 0. 退出
 ```
 
@@ -133,7 +134,31 @@ Nginx Proxy Manager 安装脚本来自：
 
 同样通过 GitHub API + 时间戳拉取，避免 raw 缓存。
 
-### 4. 网络工具 / BBR
+### 4. 端口转发 / Realm
+
+使用 [Realm](https://github.com/zhboner/realm) 管理 VPS 的 TCP / UDP 端口中转，适合入口机转发到落地机。进入后包含：
+
+```text
+1. 安装 / 更新 Realm
+2. 添加转发规则
+3. 查看转发规则
+4. 启用 / 停用规则
+5. 删除转发规则
+6. 查看 Realm 状态
+7. 查看最近日志
+8. 卸载 Realm
+0. 返回
+```
+
+- 支持 TCP、UDP、TCP+UDP，以及 IPv4 / IPv6 监听和目标地址。
+- Realm 使用官方最新 Linux musl 二进制，当前支持 x86_64、aarch64、armv7 和 arm。
+- 规则保存在 `/etc/realm/taobox-rules.tsv`，运行配置生成到 `/etc/realm/config.toml`。
+- 每次增删或启停规则都会原子写入配置；Realm 重启失败时会自动回滚修改前的规则。
+- 如果 UFW 或 firewalld 已启用，添加或重新启用规则时会自动放行对应端口；云厂商安全组仍需自行确认。
+- 删除规则或卸载 Realm 时不会自动删除防火墙放行项，避免误伤共用相同端口的其他服务。
+- 检测到非 TaoBox 管理的 `/etc/systemd/system/realm.service` 或未标记的现有 Realm 二进制时，不会强制覆盖。
+
+### 5. 网络工具 / BBR
 
 包含：
 
@@ -161,7 +186,7 @@ export WARP_INSTALLER_URL=<GitHub 镜像 menu.sh 地址>
 f
 ```
 
-### 5. 系统工具 / DD
+### 6. 系统工具 / DD
 
 包含：
 
@@ -185,7 +210,7 @@ DD 重装入口当前提供：
 
 > DD 重装属于危险操作，请确认服务商支持、备份数据并确保你知道 root 密码。
 
-### 6. 更新工具箱
+### 7. 更新工具箱
 
 会重新下载 `bootstrap-vps.sh` 并覆盖本地 `~/ssh-key-menu.sh`。当前更新逻辑也使用 GitHub API + 时间戳，避免缓存旧版本。
 

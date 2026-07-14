@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.14.1"
+TOOLBOX_VERSION="0.15.0"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -14,6 +14,11 @@ SSH_DIR="${CURRENT_HOME}/.ssh"
 AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
 MARK_BEGIN="# BEGIN VPS-SSH-KEY-MENU"
 MARK_END="# END VPS-SSH-KEY-MENU"
+REALM_BIN="/usr/local/bin/realm"
+REALM_DIR="/etc/realm"
+REALM_RULES_FILE="${REALM_DIR}/taobox-rules.tsv"
+REALM_CONFIG="${REALM_DIR}/config.toml"
+REALM_SERVICE="/etc/systemd/system/realm.service"
 
 C_CYAN=""
 C_GREEN=""
@@ -241,6 +246,20 @@ sudo_prefix() {
     printf 'sudo'
   else
     return 1
+  fi
+}
+
+run_root() {
+  local root_cmd=""
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限。"
+    return 1
+  fi
+
+  if [ -n "${root_cmd}" ]; then
+    "${root_cmd}" "$@"
+  else
+    "$@"
   fi
 }
 
@@ -2301,6 +2320,638 @@ EOF
   print_divider
 }
 
+realm_release_target() {
+  case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64) printf 'x86_64-unknown-linux-musl' ;;
+    aarch64|arm64) printf 'aarch64-unknown-linux-musl' ;;
+    armv7l|armv7) printf 'armv7-unknown-linux-musleabihf' ;;
+    armv6l|arm) printf 'arm-unknown-linux-musleabihf' ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_realm_host() {
+  local host="$1"
+  case "${host}" in
+    \[*\]) host="${host#\[}"; host="${host%\]}" ;;
+  esac
+  printf '%s' "${host}"
+}
+
+is_valid_realm_host() {
+  local host=""
+  host="$(normalize_realm_host "$1")"
+  [ -n "${host}" ] || return 1
+  printf '%s' "${host}" | grep -Eq '^[A-Za-z0-9._:%-]+$'
+}
+
+is_valid_realm_listen_host() {
+  local host=""
+  host="$(normalize_realm_host "$1")"
+  printf '%s' "${host}" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9A-Fa-f:]+(%[A-Za-z0-9_.-]+)?$'
+}
+
+is_valid_realm_rule_name() {
+  [ -n "$1" ] && printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.-]+$'
+}
+
+format_realm_address() {
+  local host=""
+  local port="$2"
+  host="$(normalize_realm_host "$1")"
+  case "${host}" in
+    *:*) printf '[%s]:%s' "${host}" "${port}" ;;
+    *) printf '%s:%s' "${host}" "${port}" ;;
+  esac
+}
+
+realm_protocol_label() {
+  case "$1" in
+    tcp) printf 'TCP' ;;
+    udp) printf 'UDP' ;;
+    both) printf 'TCP+UDP' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+realm_rules_record_count() {
+  local rules_file="${1:-${REALM_RULES_FILE}}"
+  [ -r "${rules_file}" ] || { printf '0'; return 0; }
+  awk -F '\t' 'NF >= 7 && $1 !~ /^#/ {n++} END {print n+0}' "${rules_file}"
+}
+
+realm_enabled_rule_count() {
+  local rules_file="${1:-${REALM_RULES_FILE}}"
+  [ -r "${rules_file}" ] || { printf '0'; return 0; }
+  awk -F '\t' 'NF >= 7 && $1 !~ /^#/ && $2 == "1" {n++} END {print n+0}' "${rules_file}"
+}
+
+realm_build_config() {
+  local rules_file="$1"
+  local output_file="$2"
+  local name=""
+  local enabled=""
+  local listen_host=""
+  local listen_port=""
+  local remote_host=""
+  local remote_port=""
+  local protocol=""
+  local listen_address=""
+  local remote_address=""
+  local no_tcp="false"
+  local use_udp="false"
+
+  cat > "${output_file}" <<'EOF'
+# Managed by TaoBox
+[log]
+level = "warn"
+output = "stdout"
+
+[network]
+no_tcp = false
+use_udp = true
+tcp_timeout = 5
+udp_timeout = 30
+EOF
+
+  [ -r "${rules_file}" ] || return 0
+
+  while IFS=$'\t' read -r name enabled listen_host listen_port remote_host remote_port protocol; do
+    [ -n "${name}" ] || continue
+    case "${name}" in \#*) continue ;; esac
+    [ "${enabled}" = "1" ] || continue
+
+    listen_address="$(format_realm_address "${listen_host}" "${listen_port}")"
+    remote_address="$(format_realm_address "${remote_host}" "${remote_port}")"
+    case "${protocol}" in
+      tcp) no_tcp="false"; use_udp="false" ;;
+      udp) no_tcp="true"; use_udp="true" ;;
+      both) no_tcp="false"; use_udp="true" ;;
+      *) continue ;;
+    esac
+
+    cat >> "${output_file}" <<EOF
+
+# TaoBox rule: ${name}
+[[endpoints]]
+listen = "${listen_address}"
+remote = "${remote_address}"
+
+[endpoints.network]
+no_tcp = ${no_tcp}
+use_udp = ${use_udp}
+EOF
+  done < "${rules_file}"
+}
+
+realm_write_service_file() {
+  local output_file="$1"
+  cat > "${output_file}" <<EOF
+# Managed by TaoBox
+[Unit]
+Description=Realm Port Forwarding managed by TaoBox
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${REALM_BIN} -c ${REALM_CONFIG}
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+realm_is_managed_install() {
+  [ -f "${REALM_SERVICE}" ] && grep -Fqs '# Managed by TaoBox' "${REALM_SERVICE}"
+}
+
+realm_restore_previous_files() {
+  local had_rules="$1"
+  local old_rules="$2"
+  local had_config="$3"
+  local old_config="$4"
+
+  if [ "${had_rules}" = "1" ]; then
+    run_root install -m 0644 "${old_rules}" "${REALM_RULES_FILE}" || true
+  else
+    run_root rm -f "${REALM_RULES_FILE}" || true
+  fi
+  if [ "${had_config}" = "1" ]; then
+    run_root install -m 0644 "${old_config}" "${REALM_CONFIG}" || true
+  else
+    run_root rm -f "${REALM_CONFIG}" || true
+  fi
+
+  if [ "$(realm_enabled_rule_count "${old_rules}")" -gt 0 ]; then
+    run_root systemctl enable realm >/dev/null 2>&1 || true
+    run_root systemctl restart realm >/dev/null 2>&1 || true
+  else
+    run_root systemctl disable --now realm >/dev/null 2>&1 || true
+  fi
+}
+
+realm_apply_rules_file() {
+  local new_rules="$1"
+  local tmp_config=""
+  local old_rules=""
+  local old_config=""
+  local had_rules=0
+  local had_config=0
+  local enabled_count=0
+
+  if [ ! -x "${REALM_BIN}" ] || [ ! -f "${REALM_SERVICE}" ]; then
+    err "Realm 尚未安装，请先选择安装 / 更新 Realm。"
+    return 1
+  fi
+
+  tmp_config="$(mktemp)"
+  old_rules="$(mktemp)"
+  old_config="$(mktemp)"
+  if [ -f "${REALM_RULES_FILE}" ]; then
+    cp "${REALM_RULES_FILE}" "${old_rules}"
+    had_rules=1
+  fi
+  if [ -f "${REALM_CONFIG}" ]; then
+    cp "${REALM_CONFIG}" "${old_config}"
+    had_config=1
+  fi
+
+  realm_build_config "${new_rules}" "${tmp_config}"
+  if ! run_root install -d -m 0755 "${REALM_DIR}" \
+    || ! run_root install -m 0644 "${new_rules}" "${REALM_RULES_FILE}" \
+    || ! run_root install -m 0644 "${tmp_config}" "${REALM_CONFIG}" \
+    || ! run_root systemctl daemon-reload; then
+    err "写入 Realm 配置失败。"
+    realm_restore_previous_files "${had_rules}" "${old_rules}" "${had_config}" "${old_config}"
+    rm -f "${tmp_config}" "${old_rules}" "${old_config}"
+    return 1
+  fi
+
+  enabled_count="$(realm_enabled_rule_count "${new_rules}")"
+  if [ "${enabled_count}" -gt 0 ]; then
+    if ! run_root systemctl enable realm >/dev/null 2>&1 \
+      || ! run_root systemctl restart realm; then
+      err "Realm 启动失败，已回滚到修改前的配置。"
+      run_root journalctl -u realm -n 30 --no-pager 2>/dev/null || true
+      realm_restore_previous_files "${had_rules}" "${old_rules}" "${had_config}" "${old_config}"
+      rm -f "${tmp_config}" "${old_rules}" "${old_config}"
+      return 1
+    fi
+  else
+    run_root systemctl disable --now realm >/dev/null 2>&1 || true
+  fi
+
+  rm -f "${tmp_config}" "${old_rules}" "${old_config}"
+}
+
+realm_open_active_firewall_port() {
+  local port="$1"
+  local protocol="$2"
+  local proto=""
+
+  case "${protocol}" in
+    tcp) proto="tcp" ;;
+    udp) proto="udp" ;;
+    both)
+      realm_open_active_firewall_port "${port}" tcp
+      realm_open_active_firewall_port "${port}" udp
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    run_root ufw allow "${port}/${proto}" >/dev/null
+    ok "已放行 UFW 端口 ${port}/${proto}"
+    return 0
+  fi
+
+  if have_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+    run_root firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null
+    run_root firewall-cmd --reload >/dev/null
+    ok "已放行 firewalld 端口 ${port}/${proto}"
+    return 0
+  fi
+
+  warn "未检测到已启用的 UFW / firewalld，请确认云防火墙和系统防火墙已放行 ${port}/${proto}。"
+}
+
+realm_rules_conflict() {
+  local rules_file="$1"
+  local listen_host="$2"
+  local listen_port="$3"
+  local protocol="$4"
+  local ignore_name="${5:-}"
+
+  [ -r "${rules_file}" ] || return 1
+  awk -F '\t' -v host="${listen_host}" -v port="${listen_port}" -v proto="${protocol}" -v ignore="${ignore_name}" '
+    function overlaps(a, b) { return a == "both" || b == "both" || a == b }
+    NF >= 7 && $1 !~ /^#/ && $1 != ignore && $3 == host && $4 == port && overlaps($7, proto) { found=1 }
+    END { exit found ? 0 : 1 }
+  ' "${rules_file}"
+}
+
+option_install_realm() {
+  local target=""
+  local asset=""
+  local url=""
+  local tmp_dir=""
+  local tmp_rules=""
+  local tmp_service=""
+  local jshook=""
+  local download_ok=0
+
+  if [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+    err "Realm 安装仅支持 Linux。"
+    return 1
+  fi
+  if ! have_cmd systemctl; then
+    err "当前系统没有 systemd/systemctl，暂不支持自动管理 Realm。"
+    return 1
+  fi
+  if [ -e "${REALM_SERVICE}" ] && ! realm_is_managed_install; then
+    err "检测到非 TaoBox 管理的 ${REALM_SERVICE}，为避免覆盖已停止安装。"
+    return 1
+  fi
+  if [ -e "${REALM_BIN}" ] && [ ! -e "${REALM_SERVICE}" ] && [ ! -e "${REALM_RULES_FILE}" ]; then
+    err "检测到已有 ${REALM_BIN}，但没有 TaoBox 管理标记，未自动接管。"
+    return 1
+  fi
+
+  if ! target="$(realm_release_target)"; then
+    err "Realm 暂不支持当前架构: $(uname -m 2>/dev/null)"
+    return 1
+  fi
+
+  if ! have_cmd tar || { ! have_cmd curl && ! have_cmd wget; }; then
+    if ! have_cmd apt-get; then
+      err "缺少 tar/curl/wget，且当前系统没有 apt-get。"
+      return 1
+    fi
+    say "正在安装 Realm 下载依赖..."
+    if ! run_root apt-get update \
+      || ! run_root apt-get install -y ca-certificates curl tar; then
+      err "Realm 下载依赖安装失败。"
+      return 1
+    fi
+  fi
+
+  asset="realm-${target}.tar.gz"
+  url="https://github.com/zhboner/realm/releases/latest/download/${asset}"
+  tmp_dir="$(mktemp -d)"
+  jshook="$(get_effective_jshook)"
+  say "正在下载 Realm 官方最新版本 (${target})..."
+  if have_cmd curl; then
+    if curl -fL --retry 3 -H "Cache-Control: no-cache" -H "jshook: ${jshook}" \
+      "${url}" -o "${tmp_dir}/${asset}"; then
+      download_ok=1
+    fi
+  elif have_cmd wget; then
+    if wget -O "${tmp_dir}/${asset}" --header="Cache-Control: no-cache" \
+      --header="jshook: ${jshook}" "${url}"; then
+      download_ok=1
+    fi
+  fi
+
+  if [ "${download_ok}" -ne 1 ] \
+    || ! tar -xzf "${tmp_dir}/${asset}" -C "${tmp_dir}" \
+    || [ ! -s "${tmp_dir}/realm" ]; then
+    rm -rf "${tmp_dir}"
+    err "Realm 下载或解压失败。"
+    return 1
+  fi
+  chmod +x "${tmp_dir}/realm"
+  if ! "${tmp_dir}/realm" --version >/dev/null 2>&1; then
+    rm -rf "${tmp_dir}"
+    err "下载的 Realm 二进制无法运行。"
+    return 1
+  fi
+
+  tmp_service="${tmp_dir}/realm.service"
+  realm_write_service_file "${tmp_service}"
+  if ! run_root install -d -m 0755 "${REALM_DIR}" \
+    || ! run_root install -m 0755 "${tmp_dir}/realm" "${REALM_BIN}" \
+    || ! run_root install -m 0644 "${tmp_service}" "${REALM_SERVICE}"; then
+    rm -rf "${tmp_dir}"
+    err "Realm 二进制或 systemd 服务安装失败。"
+    return 1
+  fi
+
+  if [ ! -f "${REALM_RULES_FILE}" ]; then
+    tmp_rules="${tmp_dir}/taobox-rules.tsv"
+    printf '# name\tenabled\tlisten_host\tlisten_port\tremote_host\tremote_port\tprotocol\n' > "${tmp_rules}"
+    if ! run_root install -m 0644 "${tmp_rules}" "${REALM_RULES_FILE}"; then
+      rm -rf "${tmp_dir}"
+      err "Realm 规则文件初始化失败。"
+      return 1
+    fi
+  fi
+
+  if ! realm_apply_rules_file "${REALM_RULES_FILE}"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  print_divider
+  ok "Realm 安装 / 更新完成。"
+  "${REALM_BIN}" --version 2>/dev/null || true
+  say "规则文件: ${REALM_RULES_FILE}"
+  say "配置文件: ${REALM_CONFIG}"
+  print_divider
+  rm -rf "${tmp_dir}"
+}
+
+realm_ensure_installed() {
+  if [ -x "${REALM_BIN}" ] && realm_is_managed_install; then
+    return 0
+  fi
+  warn "尚未安装 TaoBox 管理的 Realm，正在先执行安装。"
+  option_install_realm
+}
+
+option_add_realm_rule() {
+  local name=""
+  local listen_host=""
+  local listen_port=""
+  local remote_host=""
+  local remote_port=""
+  local protocol_choice=""
+  local protocol=""
+  local tmp_rules=""
+
+  realm_ensure_installed || return 1
+  prompt_read -p "规则名称（字母/数字/._-）: " name
+  if ! is_valid_realm_rule_name "${name}"; then
+    err "规则名称无效，只允许字母、数字、点、下划线和短横线。"
+    return 1
+  fi
+  if awk -F '\t' -v name="${name}" 'NF >= 7 && $1 == name {found=1} END {exit found ? 0 : 1}' "${REALM_RULES_FILE}"; then
+    err "规则名称 ${name} 已存在。"
+    return 1
+  fi
+
+  prompt_read -p "监听 IP [0.0.0.0]: " listen_host
+  listen_host="$(normalize_realm_host "${listen_host:-0.0.0.0}")"
+  if ! is_valid_realm_listen_host "${listen_host}"; then
+    err "监听 IP 格式无效。示例: 0.0.0.0 或 ::"
+    return 1
+  fi
+  prompt_read -p "监听端口: " listen_port
+  if ! is_valid_port "${listen_port}"; then
+    err "监听端口必须是 1-65535。"
+    return 1
+  fi
+  prompt_read -p "目标 IP 或域名: " remote_host
+  remote_host="$(normalize_realm_host "${remote_host}")"
+  if ! is_valid_realm_host "${remote_host}"; then
+    err "目标 IP 或域名格式无效。"
+    return 1
+  fi
+  prompt_read -p "目标端口: " remote_port
+  if ! is_valid_port "${remote_port}"; then
+    err "目标端口必须是 1-65535。"
+    return 1
+  fi
+  prompt_read -p "协议 [1=TCP, 2=UDP, 3=TCP+UDP，默认 1]: " protocol_choice
+  case "${protocol_choice:-1}" in
+    1|tcp|TCP) protocol="tcp" ;;
+    2|udp|UDP) protocol="udp" ;;
+    3|both|BOTH) protocol="both" ;;
+    *) err "协议选择无效。"; return 1 ;;
+  esac
+
+  if realm_rules_conflict "${REALM_RULES_FILE}" "${listen_host}" "${listen_port}" "${protocol}"; then
+    err "监听地址 ${listen_host}:${listen_port} 与现有规则协议冲突。"
+    return 1
+  fi
+
+  tmp_rules="$(mktemp)"
+  cp "${REALM_RULES_FILE}" "${tmp_rules}"
+  printf '%s\t1\t%s\t%s\t%s\t%s\t%s\n' \
+    "${name}" "${listen_host}" "${listen_port}" "${remote_host}" "${remote_port}" "${protocol}" >> "${tmp_rules}"
+  if ! realm_apply_rules_file "${tmp_rules}"; then
+    rm -f "${tmp_rules}"
+    return 1
+  fi
+  rm -f "${tmp_rules}"
+
+  case "${listen_host}" in
+    127.*|::1) ;;
+    *) realm_open_active_firewall_port "${listen_port}" "${protocol}" || true ;;
+  esac
+  ok "已添加并启用 Realm 规则 ${name}: $(format_realm_address "${listen_host}" "${listen_port}") -> $(format_realm_address "${remote_host}" "${remote_port}") ($(realm_protocol_label "${protocol}"))"
+}
+
+option_list_realm_rules() {
+  local count=0
+  count="$(realm_rules_record_count)"
+  say "${C_BOLD}${C_CYAN}Realm 转发规则${C_RESET}"
+  print_divider
+  if [ "${count}" -eq 0 ]; then
+    warn "当前没有转发规则。"
+    return 0
+  fi
+  printf '%-4s %-20s %-8s %-24s %-28s %-9s\n' "序号" "名称" "状态" "监听" "目标" "协议"
+  awk -F '\t' '
+    NF >= 7 && $1 !~ /^#/ {
+      n++
+      state=($2 == "1" ? "启用" : "停用")
+      proto=($7 == "tcp" ? "TCP" : ($7 == "udp" ? "UDP" : "TCP+UDP"))
+      listen=$3 ":" $4
+      remote=$5 ":" $6
+      printf "%-4d %-20s %-8s %-24s %-28s %-9s\n", n, $1, state, listen, remote, proto
+    }
+  ' "${REALM_RULES_FILE}"
+  print_divider
+}
+
+realm_resolve_rule_name() {
+  local selector="$1"
+  if printf '%s' "${selector}" | grep -Eq '^[0-9]+$'; then
+    awk -F '\t' -v wanted="${selector}" 'NF >= 7 && $1 !~ /^#/ {n++; if (n == wanted) {print $1; exit}}' "${REALM_RULES_FILE}"
+  else
+    awk -F '\t' -v wanted="${selector}" 'NF >= 7 && $1 == wanted {print $1; exit}' "${REALM_RULES_FILE}"
+  fi
+}
+
+option_toggle_realm_rule() {
+  local selector=""
+  local name=""
+  local current=""
+  local next=""
+  local tmp_rules=""
+  local listen_port=""
+  local listen_host=""
+  local protocol=""
+
+  if [ "$(realm_rules_record_count)" -eq 0 ]; then
+    warn "当前没有转发规则。"
+    return 0
+  fi
+  option_list_realm_rules
+  prompt_read -p "请输入要启用 / 停用的规则序号或名称: " selector
+  name="$(realm_resolve_rule_name "${selector}")"
+  if [ -z "${name}" ]; then
+    err "未找到对应规则。"
+    return 1
+  fi
+
+  current="$(awk -F '\t' -v name="${name}" '$1 == name {print $2; exit}' "${REALM_RULES_FILE}")"
+  if [ "${current}" = "1" ]; then next="0"; else next="1"; fi
+  tmp_rules="$(mktemp)"
+  awk -F '\t' -v OFS='\t' -v name="${name}" -v state="${next}" '$1 == name {$2=state} {print}' \
+    "${REALM_RULES_FILE}" > "${tmp_rules}"
+  if ! realm_apply_rules_file "${tmp_rules}"; then
+    rm -f "${tmp_rules}"
+    return 1
+  fi
+  rm -f "${tmp_rules}"
+
+  if [ "${next}" = "1" ]; then
+    IFS=$'\t' read -r listen_host listen_port protocol < <(awk -F '\t' -v OFS='\t' -v name="${name}" '$1 == name {print $3,$4,$7; exit}' "${REALM_RULES_FILE}")
+    case "${listen_host}" in
+      127.*|::1) ;;
+      *) realm_open_active_firewall_port "${listen_port}" "${protocol}" || true ;;
+    esac
+    ok "规则 ${name} 已启用。"
+  else
+    ok "规则 ${name} 已停用。"
+  fi
+}
+
+option_delete_realm_rule() {
+  local selector=""
+  local name=""
+  local confirm=""
+  local tmp_rules=""
+
+  if [ "$(realm_rules_record_count)" -eq 0 ]; then
+    warn "当前没有转发规则。"
+    return 0
+  fi
+  option_list_realm_rules
+  prompt_read -p "请输入要删除的规则序号或名称: " selector
+  name="$(realm_resolve_rule_name "${selector}")"
+  if [ -z "${name}" ]; then
+    err "未找到对应规则。"
+    return 1
+  fi
+  prompt_read -p "确认删除规则 ${name}？[y/N]: " confirm
+  case "${confirm}" in y|Y) ;; *) warn "已取消。"; return 0 ;; esac
+
+  tmp_rules="$(mktemp)"
+  awk -F '\t' -v name="${name}" '$1 != name {print}' "${REALM_RULES_FILE}" > "${tmp_rules}"
+  if ! realm_apply_rules_file "${tmp_rules}"; then
+    rm -f "${tmp_rules}"
+    return 1
+  fi
+  rm -f "${tmp_rules}"
+  ok "规则 ${name} 已删除。"
+  warn "为避免影响其他服务，系统防火墙中的旧端口放行规则未自动删除。"
+}
+
+option_realm_status() {
+  local service_state=""
+  local enabled_state=""
+  say "${C_BOLD}${C_CYAN}Realm 状态${C_RESET}"
+  print_divider
+  if [ -x "${REALM_BIN}" ]; then
+    "${REALM_BIN}" --version 2>/dev/null || true
+  else
+    warn "Realm 未安装。"
+    return 0
+  fi
+  service_state="$(systemctl is-active realm 2>/dev/null || true)"
+  enabled_state="$(systemctl is-enabled realm 2>/dev/null || true)"
+  say "规则总数: $(realm_rules_record_count)"
+  say "启用规则: $(realm_enabled_rule_count)"
+  say "服务状态: ${service_state:-inactive}"
+  say "开机启动: ${enabled_state:-disabled}"
+  print_divider
+  systemctl --no-pager --full status realm 2>/dev/null || true
+}
+
+option_realm_logs() {
+  if ! have_cmd journalctl; then
+    warn "当前系统没有 journalctl。"
+    return 0
+  fi
+  journalctl -u realm -n 100 --no-pager || true
+}
+
+option_uninstall_realm() {
+  local confirm=""
+  local root_cmd=""
+
+  if [ ! -e "${REALM_BIN}" ] && [ ! -e "${REALM_SERVICE}" ] && [ ! -d "${REALM_DIR}" ]; then
+    warn "Realm 尚未安装。"
+    return 0
+  fi
+  if [ -e "${REALM_SERVICE}" ] && ! realm_is_managed_install; then
+    err "检测到非 TaoBox 管理的 Realm 服务，未执行卸载。"
+    return 1
+  fi
+  prompt_read -p "确认卸载 Realm 并删除全部转发规则？[y/N]: " confirm
+  case "${confirm}" in y|Y) ;; *) warn "已取消。"; return 0 ;; esac
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限。"
+    return 1
+  fi
+
+  run_root systemctl disable --now realm >/dev/null 2>&1 || true
+  run_root rm -f "${REALM_SERVICE}" "${REALM_BIN}"
+  run_root rm -rf "${REALM_DIR}"
+  run_root systemctl daemon-reload
+  run_root systemctl reset-failed realm >/dev/null 2>&1 || true
+  ok "Realm 与 TaoBox 转发规则已卸载。"
+  warn "系统防火墙和云防火墙中的端口放行规则未自动删除。"
+}
+
 detect_firewall_backend() {
   if have_cmd ufw; then
     printf 'ufw'
@@ -2821,9 +3472,10 @@ print_toolbox_menu() {
   menu_item "1" "SSH 登录管理"
   menu_item "2" "多协议脚本"
   menu_item "3" "Docker + NPM 安装 / 容器管理"
-  menu_item "4" "网络工具 / BBR"
-  menu_item "5" "系统工具 / DD"
-  menu_item "6" "更新工具箱"
+  menu_item "4" "端口转发 / Realm"
+  menu_item "5" "网络工具 / BBR"
+  menu_item "6" "系统工具 / DD"
+  menu_item "7" "更新工具箱"
   menu_exit_item
   print_divider
 }
@@ -2889,6 +3541,41 @@ docker_menu_loop() {
       5) option_docker_restart_all ;;
       6) option_docker_logs ;;
       7) option_docker_prune ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+realm_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "端口转发 / Realm"
+    print_divider
+    menu_item "1" "安装 / 更新 Realm"
+    menu_item "2" "添加转发规则"
+    menu_item "3" "查看转发规则"
+    menu_item "4" "启用 / 停用规则"
+    menu_item "5" "删除转发规则"
+    menu_item "6" "查看 Realm 状态"
+    menu_item "7" "查看最近日志"
+    menu_item "8" "卸载 Realm"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_install_realm || true ;;
+      2) option_add_realm_rule || true ;;
+      3) option_list_realm_rules || true ;;
+      4) option_toggle_realm_rule || true ;;
+      5) option_delete_realm_rule || true ;;
+      6) option_realm_status || true ;;
+      7) option_realm_logs || true ;;
+      8) option_uninstall_realm || true ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
@@ -3057,9 +3744,10 @@ main_loop() {
       1) ssh_menu_loop ;;
       2) option_run_vless_project ;;
       3) docker_npm_menu_loop ;;
-      4) network_menu_loop ;;
-      5) system_tools_menu_loop ;;
-      6) option_update_toolbox ;;
+      4) realm_menu_loop ;;
+      5) network_menu_loop ;;
+      6) system_tools_menu_loop ;;
+      7) option_update_toolbox ;;
       0) exit 0 ;;
       *) warn "无效选项，请重新输入。"; pause ;;
     esac
