@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.15.3`
+- TaoBox VPS Toolbox：`v0.16.0`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -114,19 +114,22 @@ TaoBox 不再复制上游 `dist` 安装、sidecar 判断或固定版本回退逻
 
 ### 3. Docker + NPM 安装 / 容器管理
 
-第 3 项已整合原来的「Docker 容器管理」。进入后包含：
+第 3 项已升级为分层管理界面，首页会直接显示 Docker 容器数量与 NPM 运行状态：
 
 ```text
-1. 安装 / 重装 Docker + Nginx Proxy Manager
-2. 查看 Docker 状态
-3. 查看全部容器
-4. 启动全部容器
-5. 停止全部容器
-6. 重启全部容器
-7. 查看容器日志
-8. Docker system prune
+1. 安装 / 卸载 Docker 与 NPM（上游管理器）
+2. Docker + NPM 状态总览
+3. NPM 专项管理
+4. Docker 容器管理
+5. Docker 镜像 / 空间清理
 0. 返回
 ```
+
+NPM 专项管理支持状态与面板地址检查、启动、停止、重启、最近日志、拉取最新镜像更新，以及备份 `/opt/npm` 下的配置、SQLite 数据和证书。备份文件保存到当前用户的 `~/taobox-backups/`，为保证数据一致性，备份期间会短暂停止 NPM 并在完成后自动启动。
+
+Docker 容器管理会为全部容器生成编号，可按编号、名称或容器 ID 选择，支持单容器启停、重启、最近/实时日志、资源占用、详情和安全删除；同时保留全部容器的批量启动，以及运行中容器的批量停止和重启。
+
+镜像与空间清理拆分为磁盘占用、镜像列表、已停止容器、悬空镜像、构建缓存、常规 prune 和深度 prune。所有内置清理操作均不会自动删除 Docker 数据卷。
 
 Nginx Proxy Manager 安装脚本来自：
 

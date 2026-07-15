@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.15.3"
+TOOLBOX_VERSION="0.16.0"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -133,6 +133,8 @@ REALM_DIR="/etc/realm"
 REALM_RULES_FILE="${REALM_DIR}/taobox-rules.tsv"
 REALM_CONFIG="${REALM_DIR}/config.toml"
 REALM_SERVICE="/etc/systemd/system/realm.service"
+NPM_DIR="/opt/npm"
+NPM_COMPOSE_FILE="${NPM_DIR}/docker-compose.yml"
 
 C_CYAN=""
 C_GREEN=""
@@ -359,6 +361,34 @@ sudo_prefix() {
   elif have_cmd sudo; then
     printf 'sudo'
   else
+    return 1
+  fi
+}
+
+docker_ready() {
+  have_cmd docker || return 1
+  docker info >/dev/null 2>&1 || (have_cmd sudo && sudo docker info >/dev/null 2>&1)
+}
+
+run_npm_compose() {
+  if [ ! -f "${NPM_COMPOSE_FILE}" ]; then
+    err "未找到 NPM 配置文件 ${NPM_COMPOSE_FILE}。"
+    return 1
+  fi
+
+  if docker compose version >/dev/null 2>&1; then
+    run_docker compose -f "${NPM_COMPOSE_FILE}" "$@"
+  elif have_cmd docker-compose; then
+    if [ "$(id -u)" -eq 0 ]; then
+      docker-compose -f "${NPM_COMPOSE_FILE}" "$@"
+    elif have_cmd sudo; then
+      sudo docker-compose -f "${NPM_COMPOSE_FILE}" "$@"
+    else
+      err "当前用户无法运行 docker-compose。"
+      return 1
+    fi
+  else
+    err "未检测到 Docker Compose。"
     return 1
   fi
 }
@@ -904,7 +934,7 @@ option_npm_docker_info() {
   say "${C_BOLD}${C_CYAN}Docker + Nginx Proxy Manager${C_RESET}"
   say "--------------------------------------------------"
   say "仓库: https://github.com/tao-t356/Docker-Nginx-Proxy-Manager"
-  say "用途: 一键安装 Docker 与 Nginx Proxy Manager"
+  say "用途: 安装 / 卸载 Docker 与 Nginx Proxy Manager"
   say "原始命令: wget -qO n https://raw.githubusercontent.com/tao-t356/Docker-Nginx-Proxy-Manager/main/install.sh && bash n"
   say "当前工具箱会改成 jshook 兼容方式下载后执行。"
   say "--------------------------------------------------"
@@ -914,7 +944,7 @@ option_run_npm_docker() {
   run_remote_installer \
     "Docker-Nginx-Proxy-Manager" \
     "https://raw.githubusercontent.com/tao-t356/Docker-Nginx-Proxy-Manager/main/install.sh" \
-    "它会安装 Docker 与 Nginx Proxy Manager。"
+    "上游菜单可安装或卸载 Docker 与 Nginx Proxy Manager。"
 }
 
 option_nexttrace_info() {
@@ -1228,25 +1258,242 @@ EOF
   df -h /
 }
 
-option_docker_status() {
-  if ! have_cmd docker; then
-    warn "当前系统未安装 Docker。"
+get_npm_summary() {
+  local container_id=""
+  local state=""
+
+  if [ ! -f "${NPM_COMPOSE_FILE}" ]; then
+    printf 'not-installed'
+    return 0
+  fi
+  if ! docker_ready; then
+    printf 'installed'
     return 0
   fi
 
-  say "${C_BOLD}${C_CYAN}Docker 状态${C_RESET}"
-  say "--------------------------------------------------"
+  container_id="$(run_npm_compose ps -q app 2>/dev/null | head -n 1 || true)"
+  if [ -z "${container_id}" ]; then
+    printf 'stopped'
+    return 0
+  fi
+  state="$(run_docker inspect --format '{{.State.Status}}' "${container_id}" 2>/dev/null || true)"
+  case "${state}" in
+    running|restarting|paused) printf '%s' "${state}" ;;
+    *) printf 'stopped' ;;
+  esac
+}
+
+npm_state_text() {
+  case "$1" in
+    running) printf '运行中' ;;
+    restarting) printf '重启中' ;;
+    paused) printf '已暂停' ;;
+    stopped) printf '已停止' ;;
+    installed) printf '已安装 / Docker 不可用' ;;
+    *) printf '未安装' ;;
+  esac
+}
+
+print_docker_npm_menu_status() {
+  local running_count=0
+  local total_count=0
+  local npm_state=""
+
+  npm_state="$(get_npm_summary)"
+  if ! have_cmd docker; then
+    say "  Docker : 未安装"
+  elif ! docker_ready; then
+    say "  Docker : 已安装，但服务不可用或当前用户无权限"
+  else
+    running_count="$(run_docker ps -q 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+    total_count="$(run_docker ps -aq 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+    say "  Docker : 就绪（运行 ${running_count} / 总计 ${total_count}）"
+  fi
+  say "  NPM    : $(npm_state_text "${npm_state}")"
+}
+
+option_docker_status() {
+  local running_count=0
+  local total_count=0
+  local npm_state=""
+  local panel_ip=""
+
+  say "${C_BOLD}${C_CYAN}Docker + NPM 状态总览${C_RESET}"
+  print_divider
+  if ! have_cmd docker; then
+    warn "当前系统未安装 Docker。可返回后选择安装管理。"
+    return 0
+  fi
+
   docker --version 2>/dev/null || true
+  if docker compose version >/dev/null 2>&1; then
+    docker compose version 2>/dev/null || true
+  elif have_cmd docker-compose; then
+    docker-compose --version 2>/dev/null || true
+  else
+    warn "未检测到 Docker Compose。"
+  fi
+
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    have_cmd systemctl && systemctl --no-pager --full status docker 2>/dev/null | sed -n '1,8p' || true
+    return 0
+  fi
+
+  run_docker info --format 'Server: {{.ServerVersion}} | Storage: {{.Driver}} | Root: {{.DockerRootDir}}' 2>/dev/null || true
+  running_count="$(run_docker ps -q 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+  total_count="$(run_docker ps -aq 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+  say "容器: 运行 ${running_count} / 停止 $((total_count - running_count)) / 总计 ${total_count}"
+
+  npm_state="$(get_npm_summary)"
+  say "NPM: $(npm_state_text "${npm_state}")"
+  if [ -f "${NPM_COMPOSE_FILE}" ]; then
+    say "配置: ${NPM_COMPOSE_FILE}"
+    panel_ip="$(get_primary_ip)"
+    say "面板: http://${panel_ip:-服务器IP}:81"
+    if have_cmd curl && curl -fsS --max-time 3 http://127.0.0.1:81 >/dev/null 2>&1; then
+      ok "健康检查: 127.0.0.1:81 可访问"
+    else
+      warn "健康检查: 127.0.0.1:81 暂不可访问"
+    fi
+  fi
+  print_divider
   run_docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true
 }
 
+docker_container_record_count() {
+  run_docker ps -aq 2>/dev/null | awk 'NF {count++} END {print count+0}'
+}
+
 option_docker_list_all() {
-  if ! have_cmd docker; then
-    warn "当前系统未安装 Docker。"
+  local index=0
+  local total_count=0
+  local name=""
+  local status=""
+  local ports=""
+  local image=""
+
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 0
+  fi
+  total_count="$(docker_container_record_count)"
+  if [ "${total_count}" -eq 0 ]; then
+    warn "当前没有容器。"
     return 0
   fi
 
-  run_docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}'
+  say "${C_BOLD}${C_CYAN}Docker 容器列表${C_RESET}"
+  print_divider
+  while IFS='|' read -r name status ports image; do
+    [ -n "${name}" ] || continue
+    index=$((index + 1))
+    say "[${index}] ${name}  [${status}]"
+    say "    镜像: ${image}"
+    say "    端口: ${ports:-无}"
+    [ "${index}" -ge "${total_count}" ] || printf '\n'
+  done < <(run_docker ps -a --format '{{.Names}}|{{.Status}}|{{.Ports}}|{{.Image}}')
+  print_divider
+}
+
+docker_resolve_container() {
+  local selector="$1"
+  local resolved=""
+
+  if printf '%s' "${selector}" | grep -Eq '^[0-9]+$'; then
+    resolved="$(run_docker ps -a --format '{{.Names}}' | sed -n "${selector}p")"
+  else
+    resolved="$(run_docker inspect --type container --format '{{.Name}}' "${selector}" 2>/dev/null | sed 's#^/##' || true)"
+  fi
+  printf '%s' "${resolved}"
+}
+
+choose_docker_container() {
+  local result_var="$1"
+  local action_label="$2"
+  local selector=""
+  local resolved_name=""
+
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 1
+  fi
+  if [ "$(docker_container_record_count)" -eq 0 ]; then
+    warn "当前没有容器。"
+    return 1
+  fi
+
+  option_docker_list_all
+  prompt_read -p "请输入要${action_label}的容器序号、名称或 ID: " selector
+  resolved_name="$(docker_resolve_container "${selector}")"
+  if [ -z "${resolved_name}" ]; then
+    err "未找到对应容器。"
+    return 1
+  fi
+  printf -v "${result_var}" '%s' "${resolved_name}"
+}
+
+option_docker_control_one() {
+  local action="$1"
+  local action_label="$2"
+  local container_name=""
+  choose_docker_container container_name "${action_label}" || return 0
+  run_docker "${action}" "${container_name}"
+}
+
+option_docker_logs() {
+  local container_name=""
+  choose_docker_container container_name "查看日志" || return 0
+  run_docker logs --tail 100 "${container_name}"
+}
+
+option_docker_live_logs() {
+  local container_name=""
+  local rc=0
+  choose_docker_container container_name "实时查看日志" || return 0
+  say "按 Ctrl+C 结束实时日志并返回菜单。"
+  run_docker logs -f --tail 100 "${container_name}" || rc=$?
+  case "${rc}" in 0|130) return 0 ;; *) return "${rc}" ;; esac
+}
+
+option_docker_stats_one() {
+  local container_name=""
+  choose_docker_container container_name "查看资源占用" || return 0
+  run_docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}' "${container_name}"
+}
+
+option_docker_inspect_one() {
+  local container_name=""
+  local port_output=""
+  choose_docker_container container_name "查看详情" || return 0
+  run_docker inspect --format '名称: {{.Name}}
+ID: {{.Id}}
+镜像: {{.Config.Image}}
+状态: {{.State.Status}}
+创建时间: {{.Created}}
+启动时间: {{.State.StartedAt}}
+重启策略: {{.HostConfig.RestartPolicy.Name}}
+网络地址: {{range $name, $network := .NetworkSettings.Networks}}{{$name}}={{$network.IPAddress}} {{end}}' "${container_name}"
+  say "端口映射:"
+  port_output="$(run_docker port "${container_name}" 2>/dev/null || true)"
+  if [ -n "${port_output}" ]; then say "${port_output}"; else say "无"; fi
+}
+
+option_docker_remove_one() {
+  local container_name=""
+  local state=""
+  local confirm=""
+  choose_docker_container container_name "删除" || return 0
+  state="$(run_docker inspect --format '{{.State.Status}}' "${container_name}")"
+  if [ "${state}" = "running" ]; then
+    err "容器 ${container_name} 正在运行，请先停止后再删除。"
+    return 1
+  fi
+  prompt_read -p "确认删除容器 ${container_name}？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y) run_docker rm "${container_name}" ;;
+    *) warn "已取消。" ;;
+  esac
 }
 
 option_docker_start_all() {
@@ -1261,9 +1508,9 @@ option_docker_start_all() {
 
 option_docker_stop_all() {
   local ids=""
-  ids="$(run_docker ps -aq 2>/dev/null || true)"
+  ids="$(run_docker ps -q 2>/dev/null || true)"
   if [ -z "${ids}" ]; then
-    warn "当前没有容器。"
+    warn "当前没有运行中的容器。"
     return 0
   fi
   run_docker stop ${ids}
@@ -1271,30 +1518,149 @@ option_docker_stop_all() {
 
 option_docker_restart_all() {
   local ids=""
-  ids="$(run_docker ps -aq 2>/dev/null || true)"
+  ids="$(run_docker ps -q 2>/dev/null || true)"
   if [ -z "${ids}" ]; then
-    warn "当前没有容器。"
+    warn "当前没有运行中的容器。"
     return 0
   fi
   run_docker restart ${ids}
 }
 
-option_docker_logs() {
-  local container_name=""
-  prompt_read -p "请输入容器名: " container_name
-  if [ -z "${container_name}" ]; then
-    warn "容器名不能为空。"
+option_npm_status() {
+  local state=""
+  local panel_ip=""
+  if [ ! -f "${NPM_COMPOSE_FILE}" ]; then
+    warn "未发现 NPM 安装目录 ${NPM_DIR}。"
     return 0
   fi
-  run_docker logs --tail 100 "${container_name}"
+  if ! docker_ready; then
+    err "Docker 服务不可用，无法查询 NPM。"
+    return 1
+  fi
+  state="$(get_npm_summary)"
+  panel_ip="$(get_primary_ip)"
+  say "${C_BOLD}${C_CYAN}Nginx Proxy Manager${C_RESET}"
+  print_divider
+  say "状态: $(npm_state_text "${state}")"
+  say "目录: ${NPM_DIR}"
+  say "面板: http://${panel_ip:-服务器IP}:81"
+  run_npm_compose ps || true
+  if have_cmd curl && curl -fsS --max-time 3 http://127.0.0.1:81 >/dev/null 2>&1; then
+    ok "健康检查通过。"
+  else
+    warn "81 端口暂不可访问。"
+  fi
+}
+
+option_npm_start() {
+  run_npm_compose up -d
+}
+
+option_npm_stop() {
+  run_npm_compose stop
+}
+
+option_npm_restart() {
+  run_npm_compose restart
+}
+
+option_npm_logs() {
+  run_npm_compose logs --tail 100
+}
+
+option_npm_update() {
+  local confirm=""
+  prompt_read -p "确认拉取最新 NPM 镜像并重新创建容器？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y)
+      run_npm_compose pull || return 1
+      run_npm_compose up -d || return 1
+      option_npm_status
+      ;;
+    *) warn "已取消。" ;;
+  esac
+}
+
+option_npm_backup() {
+  local backup_dir="${CURRENT_HOME}/taobox-backups"
+  local backup_file="${backup_dir}/npm-$(date +%Y%m%d-%H%M%S).tar.gz"
+  local was_running=0
+  local rc=0
+  local npm_state=""
+
+  if [ ! -d "${NPM_DIR}" ]; then
+    warn "未发现 NPM 数据目录 ${NPM_DIR}。"
+    return 0
+  fi
+  mkdir -p "${backup_dir}" || return 1
+  npm_state="$(get_npm_summary)"
+  case "${npm_state}" in
+    running|restarting|paused)
+      was_running=1
+      say "为保证 SQLite 数据一致，将短暂停止 NPM。"
+      run_npm_compose stop || return 1
+      ;;
+  esac
+
+  run_root tar -czf "${backup_file}" -C /opt npm || rc=$?
+  if [ "${was_running}" -eq 1 ]; then
+    run_npm_compose up -d || warn "备份后未能自动启动 NPM，请手动检查。"
+  fi
+  if [ "${rc}" -ne 0 ]; then
+    err "NPM 备份失败。"
+    return "${rc}"
+  fi
+  if [ "$(id -u)" -ne 0 ]; then
+    run_root chown "$(id -u):$(id -g)" "${backup_file}" || true
+  fi
+  ok "NPM 备份完成: ${backup_file}"
+}
+
+option_docker_images() {
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 0
+  fi
+  run_docker images --format 'table {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}'
+}
+
+option_docker_disk_usage() {
+  if ! docker_ready; then
+    warn "Docker 服务不可用，或当前用户没有访问权限。"
+    return 0
+  fi
+  run_docker system df
+}
+
+option_docker_prune_stopped() {
+  local confirm=""
+  prompt_read -p "确认清理所有已停止容器？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker container prune -f ;; *) warn "已取消。" ;; esac
+}
+
+option_docker_prune_images() {
+  local confirm=""
+  prompt_read -p "确认清理悬空镜像？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker image prune -f ;; *) warn "已取消。" ;; esac
+}
+
+option_docker_prune_build_cache() {
+  local confirm=""
+  prompt_read -p "确认清理 Docker 构建缓存？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker builder prune -f ;; *) warn "已取消。" ;; esac
 }
 
 option_docker_prune() {
-  prompt_read -p "确认执行 docker system prune -f ? [y/N]: " confirm
-  case "${confirm}" in
-    y|Y) run_docker system prune -f ;;
-    *) warn "已取消。" ;;
-  esac
+  local confirm=""
+  prompt_read -p "确认清理未使用的容器、网络、悬空镜像和构建缓存（不删除数据卷）？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker system prune -f ;; *) warn "已取消。" ;; esac
+}
+
+option_docker_prune_all_images() {
+  local confirm=""
+  warn "此操作会删除所有未被容器使用的镜像，但不会删除数据卷。"
+  prompt_read -p "确认执行 docker system prune -a -f？[y/N]: " confirm
+  case "${confirm}" in y|Y) run_docker system prune -a -f ;; *) warn "已取消。" ;; esac
 }
 
 normalize_domain_input() {
@@ -3627,28 +3993,56 @@ docker_npm_menu_loop() {
     clear 2>/dev/null || true
     print_logo
     print_section_title "Docker + Nginx Proxy Manager"
+    print_docker_npm_menu_status
     print_divider
-    menu_item "1" "安装 / 重装 Docker + Nginx Proxy Manager"
-    menu_item "2" "查看 Docker 状态"
-    menu_item "3" "查看全部容器"
-    menu_item "4" "启动全部容器"
-    menu_item "5" "停止全部容器"
-    menu_item "6" "重启全部容器"
-    menu_item "7" "查看容器日志"
-    menu_item "8" "Docker system prune"
+    menu_item "1" "安装 / 卸载 Docker 与 NPM（上游管理器）"
+    menu_item "2" "Docker + NPM 状态总览"
+    menu_item "3" "NPM 专项管理"
+    menu_item "4" "Docker 容器管理"
+    menu_item "5" "Docker 镜像 / 空间清理"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
     printf '\n'
     case "${choice}" in
-      1) option_run_npm_docker ;;
-      2) option_docker_status ;;
-      3) option_docker_list_all ;;
-      4) option_docker_start_all ;;
-      5) option_docker_stop_all ;;
-      6) option_docker_restart_all ;;
-      7) option_docker_logs ;;
-      8) option_docker_prune ;;
+      1) option_run_npm_docker || true; pause ;;
+      2) option_docker_status || true; pause ;;
+      3) npm_menu_loop ;;
+      4) docker_menu_loop ;;
+      5) docker_storage_menu_loop ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。"; pause ;;
+    esac
+  done
+}
+
+npm_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Nginx Proxy Manager 管理"
+    say "  当前状态: $(npm_state_text "$(get_npm_summary)")"
+    print_divider
+    menu_item "1" "查看 NPM 状态 / 面板地址"
+    menu_item "2" "启动 NPM"
+    menu_item "3" "停止 NPM"
+    menu_item "4" "重启 NPM"
+    menu_item "5" "查看最近日志"
+    menu_item "6" "拉取最新镜像并更新 NPM"
+    menu_item "7" "备份 NPM 配置、数据和证书"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_npm_status || true ;;
+      2) option_npm_start || true ;;
+      3) option_npm_stop || true ;;
+      4) option_npm_restart || true ;;
+      5) option_npm_logs || true ;;
+      6) option_npm_update || true ;;
+      7) option_npm_backup || true ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
@@ -3661,27 +4055,71 @@ docker_menu_loop() {
   while true; do
     clear 2>/dev/null || true
     print_logo
-    print_section_title "Docker 管理"
+    print_section_title "Docker 容器管理"
     print_divider
-    menu_item "1" "查看 Docker 状态"
-    menu_item "2" "查看全部容器"
-    menu_item "3" "启动全部容器"
-    menu_item "4" "停止全部容器"
-    menu_item "5" "重启全部容器"
-    menu_item "6" "查看容器日志"
-    menu_item "7" "Docker system prune"
+    menu_item "1" "查看全部容器（带编号）"
+    menu_item "2" "启动单个容器"
+    menu_item "3" "停止单个容器"
+    menu_item "4" "重启单个容器"
+    menu_item "5" "查看容器最近日志"
+    menu_item "6" "实时跟踪容器日志"
+    menu_item "7" "查看单个容器资源占用"
+    menu_item "8" "查看单个容器详情"
+    menu_item "9" "删除已停止容器"
+    menu_item "10" "启动全部容器"
+    menu_item "11" "停止全部运行中容器"
+    menu_item "12" "重启全部运行中容器"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
     printf '\n'
     case "${choice}" in
-      1) option_docker_status ;;
-      2) option_docker_list_all ;;
-      3) option_docker_start_all ;;
-      4) option_docker_stop_all ;;
-      5) option_docker_restart_all ;;
-      6) option_docker_logs ;;
-      7) option_docker_prune ;;
+      1) option_docker_list_all || true ;;
+      2) option_docker_control_one start "启动" || true ;;
+      3) option_docker_control_one stop "停止" || true ;;
+      4) option_docker_control_one restart "重启" || true ;;
+      5) option_docker_logs || true ;;
+      6) option_docker_live_logs || true ;;
+      7) option_docker_stats_one || true ;;
+      8) option_docker_inspect_one || true ;;
+      9) option_docker_remove_one || true ;;
+      10) option_docker_start_all || true ;;
+      11) option_docker_stop_all || true ;;
+      12) option_docker_restart_all || true ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
+docker_storage_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "Docker 镜像 / 空间清理"
+    warn "以下清理项默认不删除 Docker 数据卷。"
+    print_divider
+    menu_item "1" "查看 Docker 空间占用"
+    menu_item "2" "查看本地镜像"
+    menu_item "3" "清理已停止容器"
+    menu_item "4" "清理悬空镜像"
+    menu_item "5" "清理构建缓存"
+    menu_item "6" "常规 system prune（不删数据卷）"
+    menu_item "7" "深度 system prune -a（不删数据卷）"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_docker_disk_usage || true ;;
+      2) option_docker_images || true ;;
+      3) option_docker_prune_stopped || true ;;
+      4) option_docker_prune_images || true ;;
+      5) option_docker_prune_build_cache || true ;;
+      6) option_docker_prune || true ;;
+      7) option_docker_prune_all_images || true ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
