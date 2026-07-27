@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.16.0"
+TOOLBOX_VERSION="0.16.1"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -848,6 +848,13 @@ option_run_nexttrace() {
     "NextTrace" \
     "https://nxtrace.org/nt" \
     "它会在线安装 NextTrace。"
+}
+
+option_run_nodequality() {
+  run_remote_installer \
+    "NodeQuality 综合测评" \
+    "https://run.NodeQuality.com" \
+    "它会运行 NodeQuality 的 VPS 综合测评。"
 }
 
 option_run_warp() {
@@ -4096,6 +4103,7 @@ network_menu_loop() {
     menu_item "8" "WARP (Cloudflare · 双栈/出站)"
     menu_item "9" "安装 XanMod 内核 (BBRv3)"
     menu_item "10" "查看 XanMod / BBRv3 状态"
+    menu_item "11" "NodeQuality 综合测评"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -4111,6 +4119,7 @@ network_menu_loop() {
       8) option_run_warp ;;
       9) option_install_xanmod ;;
       10) option_xanmod_info ;;
+      11) option_run_nodequality ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
