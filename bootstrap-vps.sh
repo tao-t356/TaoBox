@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.16.1"
+TOOLBOX_VERSION="0.16.2"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -2715,6 +2715,40 @@ EOF
   print_divider
 }
 
+option_upgrade_komari_server() {
+  local root_cmd=""
+  local rc=0
+
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能升级 Komari。"
+    return 1
+  fi
+
+  if [ ! -x /opt/komari/komari ]; then
+    err "未发现已安装的 Komari，请先选择“安装 / 重装 Komari”。"
+    return 1
+  fi
+
+  if [ ! -x /usr/local/sbin/taobox-komari-update ]; then
+    err "当前 Komari 没有 TaoBox 更新组件，请先选择“安装 / 重装 Komari”补齐更新任务。"
+    return 1
+  fi
+
+  say "正在检查 Komari 最新版本..."
+  if [ -n "${root_cmd}" ]; then
+    "${root_cmd}" /usr/local/sbin/taobox-komari-update || rc=$?
+  else
+    /usr/local/sbin/taobox-komari-update || rc=$?
+  fi
+
+  if [ "${rc}" -eq 0 ]; then
+    ok "Komari 升级检查完成。"
+  else
+    err "Komari 升级失败，请检查: journalctl -u komari -n 80 --no-pager"
+  fi
+  return "${rc}"
+}
+
 option_uninstall_komari_server() {
   local root_cmd=""
   local tmp_script=""
@@ -4250,6 +4284,7 @@ komari_menu_loop() {
     print_divider
     menu_item "1" "安装 / 重装 Komari"
     menu_item "2" "卸载 Komari"
+    menu_item "3" "升级 Komari"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -4257,6 +4292,7 @@ komari_menu_loop() {
     case "${choice}" in
       1) option_install_komari_server ;;
       2) option_uninstall_komari_server ;;
+      3) option_upgrade_komari_server ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac

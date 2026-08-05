@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.16.1`
+- TaoBox VPS Toolbox：`v0.16.2`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -205,7 +205,7 @@ f
 - DD 重装系统入口
 - Komari 服务器监控
 
-Komari 入口位于「系统工具 / DD」。进入后可选择安装 / 重装或卸载。安装时输入域名后，会按官方原生二进制方式安装 Komari，监听 `127.0.0.1:25774`，再自动注册到 TaoBox 共享 Nginx 网关，共用证书与 443 分流逻辑。卸载会移除 `komari.service`、自动更新定时器、`/opt/komari` 和对应 TaoBox Nginx 反代配置。
+Komari 入口位于「系统工具 / DD」。进入后可选择安装 / 重装、升级或卸载。升级会立即检查并下载 Komari 官方最新原生二进制，保留数据并自动重启服务；安装时输入域名后，会按官方原生二进制方式安装 Komari，监听 `127.0.0.1:25774`，再自动注册到 TaoBox 共享 Nginx 网关，共用证书与 443 分流逻辑。卸载会移除 `komari.service`、自动更新定时器、`/opt/komari` 和对应 TaoBox Nginx 反代配置。
 
 DD 重装入口当前提供：
 
