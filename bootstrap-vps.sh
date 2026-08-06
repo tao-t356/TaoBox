@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.16.2"
+TOOLBOX_VERSION="0.16.3"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -135,6 +135,12 @@ REALM_CONFIG="${REALM_DIR}/config.toml"
 REALM_SERVICE="/etc/systemd/system/realm.service"
 NPM_DIR="/opt/npm"
 NPM_COMPOSE_FILE="${NPM_DIR}/docker-compose.yml"
+AUTO_SHUTDOWN_DIR="/etc/taobox-auto-shutdown"
+AUTO_SHUTDOWN_EXPIRY_FILE="${AUTO_SHUTDOWN_DIR}/expiry"
+AUTO_SHUTDOWN_SERVICE_UNIT="taobox-auto-shutdown.service"
+AUTO_SHUTDOWN_TIMER_UNIT="taobox-auto-shutdown.timer"
+AUTO_SHUTDOWN_SERVICE_FILE="/etc/systemd/system/${AUTO_SHUTDOWN_SERVICE_UNIT}"
+AUTO_SHUTDOWN_TIMER_FILE="/etc/systemd/system/${AUTO_SHUTDOWN_TIMER_UNIT}"
 
 C_CYAN=""
 C_GREEN=""
@@ -3816,6 +3822,347 @@ option_reboot_server() {
   fi
 }
 
+auto_shutdown_systemd_ready() {
+  if ! have_cmd systemctl || [ ! -d /run/systemd/system ]; then
+    err "当前系统未运行 systemd，无法使用 VPS 到期关机。"
+    return 1
+  fi
+}
+
+auto_shutdown_systemctl() {
+  local root_cmd="$1"
+  shift
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} systemctl "$@"
+  else
+    systemctl "$@"
+  fi
+}
+
+auto_shutdown_read_expiry() {
+  if [ -r "${AUTO_SHUTDOWN_EXPIRY_FILE}" ]; then
+    sed -n '1p' "${AUTO_SHUTDOWN_EXPIRY_FILE}"
+  fi
+}
+
+auto_shutdown_normalize_expiry() {
+  local input="$1"
+  local candidate=""
+  local normalized=""
+
+  if [[ "${input}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}$ ]]; then
+    candidate="${input}:00"
+  elif [[ "${input}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+    candidate="${input}"
+  else
+    return 1
+  fi
+
+  if ! normalized="$(date -d "${candidate}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"; then
+    return 1
+  fi
+
+  if [ "${normalized}" != "${candidate}" ]; then
+    return 1
+  fi
+
+  printf '%s' "${normalized}"
+}
+
+auto_shutdown_add_month_expiry() {
+  local expiry="$1"
+  local source_date=""
+  local source_month_start=""
+  local target_month_start=""
+  local last_day=""
+  local source_day=""
+  local target_day=0
+  local target_date=""
+  local source_time=""
+
+  if ! source_date="$(date -d "${expiry}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"; then
+    return 1
+  fi
+  source_month_start="$(date -d "${source_date}" '+%Y-%m-01' 2>/dev/null)" || return 1
+  target_month_start="$(date -d "${source_month_start} +1 month" '+%Y-%m-01' 2>/dev/null)" || return 1
+  last_day="$(date -d "${target_month_start} +1 month -1 day" '+%d' 2>/dev/null)" || return 1
+  source_day="$(date -d "${source_date}" '+%d' 2>/dev/null)" || return 1
+  source_time="$(date -d "${source_date}" '+%H:%M:%S' 2>/dev/null)" || return 1
+
+  target_day=$((10#${source_day}))
+  if [ "${target_day}" -gt "$((10#${last_day}))" ]; then
+    target_day=$((10#${last_day}))
+  fi
+
+  printf -v target_date '%s%02d %s' "${target_month_start:0:8}" "${target_day}" "${source_time}"
+  auto_shutdown_normalize_expiry "${target_date}"
+}
+
+auto_shutdown_print_remaining() {
+  local expiry_epoch="$1"
+  local now_epoch="$(date +%s)"
+  local remaining=$((expiry_epoch - now_epoch))
+  local days=0
+  local hours=0
+  local minutes=0
+  local seconds=0
+
+  if [ "${remaining}" -le 0 ]; then
+    warn "到期时间已到或已过期。"
+    return 0
+  fi
+
+  days=$((remaining / 86400))
+  hours=$(((remaining % 86400) / 3600))
+  minutes=$(((remaining % 3600) / 60))
+  seconds=$((remaining % 60))
+  say "剩余时间: ${days} 天 ${hours} 小时 ${minutes} 分 ${seconds} 秒"
+}
+
+auto_shutdown_schedule_expiry() {
+  local requested_expiry="$1"
+  local normalized_expiry=""
+  local expiry_epoch=""
+  local now_epoch=""
+  local root_cmd=""
+  local shutdown_path=""
+  local shutdown_args=""
+  local service_tmp=""
+  local timer_tmp=""
+  local expiry_tmp=""
+
+  auto_shutdown_systemd_ready || return 1
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能设置 VPS 到期关机。"
+    return 1
+  fi
+
+  if ! normalized_expiry="$(auto_shutdown_normalize_expiry "${requested_expiry}")"; then
+    err "日期格式无效，必须使用 YYYY-MM-DD HH:MM 或 YYYY-MM-DD HH:MM:SS。"
+    return 1
+  fi
+  if ! expiry_epoch="$(date -d "${normalized_expiry}" +%s 2>/dev/null)"; then
+    err "无法解析到期时间。"
+    return 1
+  fi
+  now_epoch="$(date +%s)"
+  if [ "${expiry_epoch}" -le "${now_epoch}" ]; then
+    err "到期时间必须晚于当前时间。"
+    return 1
+  fi
+
+  shutdown_path="$(command -v shutdown 2>/dev/null || true)"
+  if [ -z "${shutdown_path}" ]; then
+    shutdown_path="$(command -v systemctl 2>/dev/null || true)"
+    shutdown_args="poweroff"
+  else
+    shutdown_args="-h now"
+  fi
+  if [ -z "${shutdown_path}" ]; then
+    err "当前系统没有 shutdown 或 systemctl 命令。"
+    return 1
+  fi
+
+  service_tmp="$(mktemp)"
+  timer_tmp="$(mktemp)"
+  expiry_tmp="$(mktemp)"
+  cat > "${service_tmp}" <<EOF
+[Unit]
+Description=TaoBox VPS 到期自动关机
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=${shutdown_path} ${shutdown_args}
+EOF
+
+  cat > "${timer_tmp}" <<EOF
+[Unit]
+Description=TaoBox VPS 到期自动关机定时器
+
+[Timer]
+OnCalendar=${normalized_expiry}
+Persistent=true
+AccuracySec=1s
+Unit=${AUTO_SHUTDOWN_SERVICE_UNIT}
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  printf '%s\n' "${normalized_expiry}" > "${expiry_tmp}"
+
+  if [ -n "${root_cmd}" ]; then
+    if ! ${root_cmd} install -d -m 755 "${AUTO_SHUTDOWN_DIR}" || \
+       ! ${root_cmd} install -m 644 "${service_tmp}" "${AUTO_SHUTDOWN_SERVICE_FILE}" || \
+       ! ${root_cmd} install -m 644 "${timer_tmp}" "${AUTO_SHUTDOWN_TIMER_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "写入自动关机 systemd 配置失败。"
+      return 1
+    fi
+  else
+    if ! install -d -m 755 "${AUTO_SHUTDOWN_DIR}" || \
+       ! install -m 644 "${service_tmp}" "${AUTO_SHUTDOWN_SERVICE_FILE}" || \
+       ! install -m 644 "${timer_tmp}" "${AUTO_SHUTDOWN_TIMER_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "写入自动关机 systemd 配置失败。"
+      return 1
+    fi
+  fi
+
+  if ! auto_shutdown_systemctl "${root_cmd}" daemon-reload; then
+    rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+    err "重新加载 systemd 配置失败。"
+    return 1
+  fi
+  if ! auto_shutdown_systemctl "${root_cmd}" enable "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1; then
+    rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+    err "启用自动关机定时器失败。"
+    return 1
+  fi
+  if ! auto_shutdown_systemctl "${root_cmd}" restart "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1; then
+    if ! auto_shutdown_systemctl "${root_cmd}" start "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "启动自动关机定时器失败，请检查 systemd 状态。"
+      return 1
+    fi
+  fi
+
+  if [ -n "${root_cmd}" ]; then
+    if ! ${root_cmd} install -m 644 "${expiry_tmp}" "${AUTO_SHUTDOWN_EXPIRY_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "保存到期时间失败。"
+      return 1
+    fi
+  else
+    if ! install -m 644 "${expiry_tmp}" "${AUTO_SHUTDOWN_EXPIRY_FILE}"; then
+      rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+      err "保存到期时间失败。"
+      return 1
+    fi
+  fi
+
+  rm -f "${service_tmp}" "${timer_tmp}" "${expiry_tmp}"
+  ok "已设置 VPS 到期自动关机。"
+  say "到期时间: ${normalized_expiry}"
+  say "到期后将由 systemd 自动执行关机；如果到期时 VPS 正在关机或离线，重新启动后会立即执行。"
+}
+
+option_auto_shutdown_set_expiry() {
+  local current_expiry=""
+  local input=""
+
+  current_expiry="$(auto_shutdown_read_expiry)"
+  if [ -n "${current_expiry}" ]; then
+    warn "当前已设置到期时间: ${current_expiry}"
+    warn "如需替换时间，请选择“修改到期日期”。"
+    return 0
+  fi
+
+  prompt_read -p "到期时间（YYYY-MM-DD HH:MM，例如 2026-09-30 23:59）: " input
+  [ -n "${input}" ] || { warn "已取消。"; return 0; }
+  auto_shutdown_schedule_expiry "${input}"
+}
+
+option_auto_shutdown_add_month() {
+  local current_expiry=""
+  local base_epoch=""
+  local now_epoch=""
+  local base_expiry=""
+  local new_expiry=""
+
+  current_expiry="$(auto_shutdown_read_expiry)"
+  if [ -z "${current_expiry}" ]; then
+    warn "当前还没有设置到期时间，请先选择“设置到期时间”。"
+    return 0
+  fi
+  if ! base_epoch="$(date -d "${current_expiry}" +%s 2>/dev/null)"; then
+    err "当前到期时间记录无效，请使用“修改到期日期”重新设置。"
+    return 1
+  fi
+  now_epoch="$(date +%s)"
+  if [ "${base_epoch}" -lt "${now_epoch}" ]; then
+    base_epoch="${now_epoch}"
+  fi
+  base_expiry="$(date -d "@${base_epoch}" '+%Y-%m-%d %H:%M:%S')"
+  if ! new_expiry="$(auto_shutdown_add_month_expiry "${base_expiry}")"; then
+    err "无法计算下一个月的到期时间。"
+    return 1
+  fi
+  auto_shutdown_schedule_expiry "${new_expiry}"
+}
+
+option_auto_shutdown_modify_expiry() {
+  local input=""
+
+  prompt_read -p "新的到期时间（YYYY-MM-DD HH:MM，例如 2026-09-30 23:59）: " input
+  [ -n "${input}" ] || { warn "已取消。"; return 0; }
+  auto_shutdown_schedule_expiry "${input}"
+}
+
+option_auto_shutdown_view() {
+  local expiry=""
+  local expiry_epoch=""
+  local timer_state="未运行"
+  local timer_enabled="未启用"
+
+  expiry="$(auto_shutdown_read_expiry)"
+  if [ -z "${expiry}" ]; then
+    warn "当前未设置 VPS 到期自动关机。"
+    return 0
+  fi
+  if ! expiry_epoch="$(date -d "${expiry}" +%s 2>/dev/null)"; then
+    err "到期时间记录无效: ${expiry}"
+    return 1
+  fi
+
+  if have_cmd systemctl; then
+    timer_state="$(systemctl is-active "${AUTO_SHUTDOWN_TIMER_UNIT}" 2>/dev/null || true)"
+    timer_enabled="$(systemctl is-enabled "${AUTO_SHUTDOWN_TIMER_UNIT}" 2>/dev/null || true)"
+    timer_state="${timer_state:-未运行}"
+    timer_enabled="${timer_enabled:-未启用}"
+  fi
+
+  say "VPS 到期自动关机"
+  say "--------------------------------------------------"
+  say "到期时间: ${expiry}"
+  say "定时器状态: ${timer_state}"
+  say "开机启动: ${timer_enabled}"
+  auto_shutdown_print_remaining "${expiry_epoch}"
+  say "--------------------------------------------------"
+}
+
+option_auto_shutdown_cancel() {
+  local root_cmd=""
+  local expiry=""
+
+  expiry="$(auto_shutdown_read_expiry)"
+  if [ -z "${expiry}" ] && [ ! -e "${AUTO_SHUTDOWN_SERVICE_FILE}" ] && [ ! -e "${AUTO_SHUTDOWN_TIMER_FILE}" ]; then
+    warn "当前没有 VPS 到期自动关机计划。"
+    return 0
+  fi
+  if ! root_cmd="$(sudo_prefix)"; then
+    err "需要 root 或 sudo 权限才能取消 VPS 到期自动关机。"
+    return 1
+  fi
+
+  if auto_shutdown_systemd_ready >/dev/null 2>&1; then
+    auto_shutdown_systemctl "${root_cmd}" disable --now "${AUTO_SHUTDOWN_TIMER_UNIT}" >/dev/null 2>&1 || true
+  fi
+
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} rm -f "${AUTO_SHUTDOWN_EXPIRY_FILE}" "${AUTO_SHUTDOWN_SERVICE_FILE}" "${AUTO_SHUTDOWN_TIMER_FILE}"
+    ${root_cmd} rmdir "${AUTO_SHUTDOWN_DIR}" >/dev/null 2>&1 || true
+  else
+    rm -f "${AUTO_SHUTDOWN_EXPIRY_FILE}" "${AUTO_SHUTDOWN_SERVICE_FILE}" "${AUTO_SHUTDOWN_TIMER_FILE}"
+    rmdir "${AUTO_SHUTDOWN_DIR}" >/dev/null 2>&1 || true
+  fi
+  if auto_shutdown_systemd_ready >/dev/null 2>&1; then
+    auto_shutdown_systemctl "${root_cmd}" daemon-reload >/dev/null 2>&1 || true
+  fi
+  ok "已取消 VPS 到期自动关机。"
+}
+
 run_dd_reinstall_system() {
   local root_cmd=""
   local jshook=""
@@ -4300,6 +4647,36 @@ komari_menu_loop() {
   done
 }
 
+auto_shutdown_menu_loop() {
+  local choice=""
+  while true; do
+    clear 2>/dev/null || true
+    print_logo
+    print_section_title "VPS 到期关机"
+    say "设置一个到期时间，到点后由 systemd 自动关闭 VPS。"
+    print_divider
+    menu_item "1" "设置到期时间"
+    menu_item "2" "增加 1 个月"
+    menu_item "3" "修改到期日期"
+    menu_item "4" "查看剩余时间"
+    menu_item "5" "取消自动关机"
+    menu_back_item
+    print_divider
+    prompt_read -p "请输入你的选择: " choice
+    printf '\n'
+    case "${choice}" in
+      1) option_auto_shutdown_set_expiry ;;
+      2) option_auto_shutdown_add_month ;;
+      3) option_auto_shutdown_modify_expiry ;;
+      4) option_auto_shutdown_view ;;
+      5) option_auto_shutdown_cancel ;;
+      0) return 0 ;;
+      *) warn "无效选项，请重新输入。" ;;
+    esac
+    pause
+  done
+}
+
 system_tools_menu_loop() {
   local choice=""
   while true; do
@@ -4315,6 +4692,7 @@ system_tools_menu_loop() {
     menu_item "6" "重启服务器"
     menu_item "7" "DD 重装系统（危险）"
     menu_item "8" "Komari 服务器监控"
+    menu_item "9" "VPS 到期关机"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择: " choice
@@ -4328,6 +4706,7 @@ system_tools_menu_loop() {
       6) option_reboot_server ;;
       7) dd_reinstall_menu_loop ;;
       8) komari_menu_loop ;;
+      9) auto_shutdown_menu_loop ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac
