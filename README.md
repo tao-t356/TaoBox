@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.16.3`
+- TaoBox VPS Toolbox：`v0.16.4`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -58,6 +58,23 @@ f
 ```
 
 即可再次打开 TaoBox。
+
+### 卸载 TaoBox
+
+卸载菜单本身（不会删除通过 TaoBox 安装的服务和业务数据）：
+
+```bash
+curl -fsSL -H "jshook: ${JSHOOK:-123}" \
+  https://raw.githubusercontent.com/tao-t356/TaoBox/main/scripts/uninstall-taobox.sh | bash
+```
+
+如需无交互卸载，可将参数传给管道中的 Bash：
+
+```bash
+curl -fsSL -H "jshook: ${JSHOOK:-123}" \
+  https://raw.githubusercontent.com/tao-t356/TaoBox/main/scripts/uninstall-taobox.sh \
+  | bash -s -- --yes
+```
 
 ## 主菜单
 
@@ -254,6 +271,7 @@ JSHOOK=facker bash bootstrap-vps.sh
 bootstrap-vps.sh              # 自包含安装器，会写入 ~/ssh-key-menu.sh
 ssh-key-menu.sh               # 已展开的菜单脚本版本
 scripts/taobox-speed.sh       # TaoBox Speed 一体化脚本
+scripts/uninstall-taobox.sh   # 卸载 TaoBox 菜单本身，保留业务服务和数据
 scripts/tcp-one-click-optimize.sh
 scripts/lib/tcp-core.sh       # TCP 调优兼容库
 inventory/                    # 早期 Ansible 批量管理示例
