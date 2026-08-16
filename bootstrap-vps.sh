@@ -3642,6 +3642,47 @@ option_update_toolbox() {
   exec bash "${SCRIPT_PATH}"
 }
 
+option_uninstall_toolbox() {
+  local jshook=""
+  local tmp_script=""
+  local uninstall_url="https://raw.githubusercontent.com/${REPO_SLUG}/main/scripts/uninstall-taobox.sh"
+  local download_ok=0
+  local rc=0
+
+  warn "卸载只会删除 TaoBox 菜单、快捷命令和 TaoBox PATH 配置。"
+  say "Docker、NPM、Realm、VLESS、证书及其他业务数据都会保留。"
+  prompt_read -p "确认卸载 TaoBox？[y/N]: " confirm
+  case "${confirm}" in
+    y|Y|yes|YES) ;;
+    *) say "已取消。"; return 0 ;;
+  esac
+
+  jshook="$(get_effective_jshook)"
+  tmp_script="$(mktemp)"
+  if have_cmd curl; then
+    if curl -fsSL -H "jshook: ${jshook}" "${uninstall_url}" -o "${tmp_script}"; then
+      download_ok=1
+    fi
+  elif have_cmd wget; then
+    if wget -qO "${tmp_script}" --header="jshook: ${jshook}" "${uninstall_url}"; then
+      download_ok=1
+    fi
+  fi
+
+  if [ "${download_ok}" -ne 1 ] || [ ! -s "${tmp_script}" ] || ! bash -n "${tmp_script}"; then
+    rm -f "${tmp_script}"
+    err "卸载脚本下载或校验失败。"
+    return 1
+  fi
+
+  bash "${tmp_script}" --target "${SCRIPT_PATH}" --yes || rc=$?
+  rm -f "${tmp_script}"
+  if [ "${rc}" -eq 0 ]; then
+    exit 0
+  fi
+  return "${rc}"
+}
+
 detect_x86_64_psabi_level() {
   awk '
     BEGIN {
@@ -4371,6 +4412,7 @@ print_toolbox_menu() {
   menu_item "5" "网络工具 / BBR"
   menu_item "6" "系统工具 / DD"
   menu_item "7" "更新工具箱"
+  menu_item "8" "卸载 TaoBox（保留业务数据）"
   menu_exit_item
   print_divider
 }
@@ -4751,6 +4793,7 @@ main_loop() {
       5) network_menu_loop ;;
       6) system_tools_menu_loop ;;
       7) option_update_toolbox ;;
+      8) option_uninstall_toolbox ;;
       0) exit 0 ;;
       *) warn "无效选项，请重新输入。"; pause ;;
     esac

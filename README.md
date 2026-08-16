@@ -86,6 +86,7 @@ curl -fsSL -H "jshook: ${JSHOOK:-123}" \
 5. 网络工具 / BBR
 6. 系统工具 / DD
 7. 更新工具箱
+8. 卸载 TaoBox（保留业务数据）
 0. 退出
 ```
 
