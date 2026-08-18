@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.16.4"
+TOOLBOX_VERSION="0.16.5"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -4229,7 +4229,7 @@ run_dd_reinstall_system() {
   jshook="$(get_effective_jshook)"
 
   case "${distro}" in
-    debian|ubuntu|centos|alma|rocky|almalinux|fedora)
+    debian|ubuntu|centos|alma|rocky|almalinux|fedora|windows)
       distro_flag="-${distro}"
       ;;
     *)
@@ -4275,6 +4275,8 @@ dd_reinstall_menu_loop() {
     menu_item "2" "Debian 13"
     menu_item "3" "Ubuntu 22.04"
     menu_item "4" "Ubuntu 24.04"
+    menu_item "5" "Windows 10"
+    menu_item "6" "Windows 11"
     menu_back_item
     print_divider
     prompt_read -p "请输入你的选择 [2]: " choice
@@ -4284,6 +4286,8 @@ dd_reinstall_menu_loop() {
       2) run_dd_reinstall_system "debian" "13" ;;
       3) run_dd_reinstall_system "ubuntu" "22.04" ;;
       4) run_dd_reinstall_system "ubuntu" "24.04" ;;
+      5) run_dd_reinstall_system "windows" "10" ;;
+      6) run_dd_reinstall_system "windows" "11" ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac

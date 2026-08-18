@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.16.4`
+- TaoBox VPS Toolbox：`v0.16.5`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -234,6 +234,8 @@ DD 重装入口当前提供：
 - Debian 13
 - Ubuntu 22.04
 - Ubuntu 24.04
+- Windows 10
+- Windows 11
 
 > DD 重装属于危险操作，请确认服务商支持、备份数据并确保你知道 root 密码。
 
