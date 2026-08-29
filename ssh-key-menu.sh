@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.16.5"
+TOOLBOX_VERSION="0.16.6"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -4097,15 +4097,23 @@ run_dd_reinstall_system() {
   local version="$2"
   local root_pass=""
   local tmp_file=""
-  local dd_url="https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-  local distro_flag=""
+  local reinstall_url="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+  local image_url=""
+  local disk_source=""
+  local disk_name=""
+  local disk_size=""
+  local -a reinstall_args=()
 
   if ! root_cmd="$(sudo_prefix)"; then
     err "需要 root 或 sudo 权限才能执行 DD 重装。"
     return 1
   fi
 
-  prompt_secret -p "新系统 root 密码: " root_pass
+  if [ "${distro}" = "windows" ] && [ "${version}" = "10" ]; then
+    root_pass="Teddysun.com"
+  else
+    prompt_secret -p "新系统 root/管理员密码: " root_pass
+  fi
   printf '\n'
   if [ -z "${root_pass}" ]; then
     warn "密码不能为空。"
@@ -4114,21 +4122,65 @@ run_dd_reinstall_system() {
 
   jshook="$(get_effective_jshook)"
 
-  case "${distro}" in
-    debian|ubuntu|centos|alma|rocky|almalinux|fedora|windows)
-      distro_flag="-${distro}"
-      ;;
-    *)
-      err "暂不支持的系统类型: ${distro}"
+  if [ "${distro}" = "windows" ] && [ "${version}" = "11" ]; then
+    disk_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    disk_name="$(lsblk -ndo PKNAME "${disk_source}" 2>/dev/null | head -n 1 || true)"
+    while [ -n "${disk_name}" ]; do
+      local parent_name=""
+      parent_name="$(lsblk -ndo PKNAME "/dev/${disk_name}" 2>/dev/null | head -n 1 || true)"
+      if [ -z "${parent_name}" ]; then
+        break
+      fi
+      disk_name="${parent_name}"
+    done
+    if [ -n "${disk_name}" ]; then
+      disk_size="$(lsblk -bndo SIZE "/dev/${disk_name}" 2>/dev/null || true)"
+    fi
+    if [ -n "${disk_size}" ] && [ "${disk_size}" -lt $((25 * 1024 * 1024 * 1024)) ]; then
+      err "Windows 11 安装需要至少约 25 GiB 磁盘；当前只有 $((disk_size / 1024 / 1024 / 1024)) GiB。"
+      err "20 GiB 机器请选择 Windows 10（LTSC DD 镜像）。"
       return 1
-      ;;
-  esac
+    fi
+  fi
+
+  if [ "${distro}" = "windows" ] && [ "${version}" = "10" ]; then
+    image_url="https://dl.lamp.sh/vhd/zh-cn_windows10_ltsc.xz"
+    reinstall_args=(
+      dd
+      --img "${image_url}"
+      --username administrator
+      --password "${root_pass}"
+      --rdp-port 3389
+    )
+    warn "Windows 10 使用中文 LTSC raw 镜像，适配 20 GiB 磁盘；最终管理员密码为 Teddysun.com。"
+  elif [ "${distro}" = "windows" ]; then
+    reinstall_args=(
+      windows
+      --image-name "Windows 11 Pro"
+      --lang zh-cn
+      --username administrator
+      --password "${root_pass}"
+      --rdp-port 3389
+    )
+  else
+    case "${distro}" in
+      debian|ubuntu|centos|alma|rocky|almalinux|fedora)
+        reinstall_args=("${distro}" "${version}" --username root --password "${root_pass}")
+        ;;
+      *)
+        err "暂不支持的系统类型: ${distro}"
+        return 1
+        ;;
+    esac
+  fi
 
   tmp_file="$(mktemp)"
   if have_cmd curl; then
-    curl -fsSL -H "jshook: ${jshook}" "${dd_url}" -o "${tmp_file}"
+    curl -fsSL --retry 3 --connect-timeout 10 -H "jshook: ${jshook}" \
+      "${reinstall_url}?ts=$(date +%s)" -o "${tmp_file}"
   elif have_cmd wget; then
-    wget --no-check-certificate -qO "${tmp_file}" --header="jshook: ${jshook}" "${dd_url}"
+    wget --no-check-certificate --tries=3 --timeout=20 -qO "${tmp_file}" \
+      --header="jshook: ${jshook}" "${reinstall_url}?ts=$(date +%s)"
   else
     err "需要 curl 或 wget 其中一个命令。"
     rm -f "${tmp_file}"
@@ -4138,9 +4190,9 @@ run_dd_reinstall_system() {
   chmod +x "${tmp_file}"
   warn "即将开始 DD 重装到 ${distro} ${version}，当前会话可能很快断开。"
   if [ -n "${root_cmd}" ]; then
-    run_with_tty ${root_cmd} bash "${tmp_file}" "${distro_flag}" "${version}" -pwd "${root_pass}"
+    run_with_tty "${root_cmd}" bash "${tmp_file}" "${reinstall_args[@]}"
   else
-    run_with_tty bash "${tmp_file}" "${distro_flag}" "${version}" -pwd "${root_pass}"
+    run_with_tty bash "${tmp_file}" "${reinstall_args[@]}"
   fi
 }
 
