@@ -120,7 +120,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.16.6"
+TOOLBOX_VERSION="0.16.7"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -4364,7 +4364,11 @@ apply_password_mode() {
   cat > "${tmp_script}" <<EOF
 set -e
 CONFIG="/etc/ssh/sshd_config"
-MANAGED_FILE="/etc/ssh/sshd_config.d/99-vps-ssh-key-menu.conf"
+# OpenSSH uses the first value it encounters for most settings.  Ubuntu's
+# cloud-init drop-in commonly enables PasswordAuthentication in
+# 50-cloud-init.conf, so a 99-* file cannot override it.
+MANAGED_FILE="/etc/ssh/sshd_config.d/00-vps-ssh-key-menu.conf"
+LEGACY_MANAGED_FILE="/etc/ssh/sshd_config.d/99-vps-ssh-key-menu.conf"
 USE_INCLUDE=0
 
 if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\\.d/\\*\\.conf' "\${CONFIG}" 2>/dev/null; then
@@ -4380,6 +4384,10 @@ backup_file() {
 if [ "\${USE_INCLUDE}" = "1" ]; then
   mkdir -p /etc/ssh/sshd_config.d
   backup_file "\${MANAGED_FILE}"
+  if [ -f "\${LEGACY_MANAGED_FILE}" ]; then
+    backup_file "\${LEGACY_MANAGED_FILE}"
+    rm -f "\${LEGACY_MANAGED_FILE}"
+  fi
   cat > "\${MANAGED_FILE}" <<'CONF'
 # Managed by ${SCRIPT_NAME}
 PubkeyAuthentication yes
