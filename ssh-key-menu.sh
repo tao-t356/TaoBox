@@ -6,7 +6,7 @@ SCRIPT_NAME="$(basename "$0")"
 SCRIPT_PATH="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 APP_NAME="TaoBox"
 REPO_SLUG="tao-t356/TaoBox"
-TOOLBOX_VERSION="0.16.7"
+TOOLBOX_VERSION="0.16.8"
 DEFAULT_JSHOOK="123"
 CURRENT_USER="$(id -un)"
 CURRENT_HOME="${HOME:-/root}"
@@ -4102,6 +4102,8 @@ run_dd_reinstall_system() {
   local disk_source=""
   local disk_name=""
   local disk_size=""
+  local reinstall_rc=0
+  local reboot_choice=""
   local -a reinstall_args=()
 
   if ! root_cmd="$(sudo_prefix)"; then
@@ -4190,9 +4192,29 @@ run_dd_reinstall_system() {
   chmod +x "${tmp_file}"
   warn "即将开始 DD 重装到 ${distro} ${version}，当前会话可能很快断开。"
   if [ -n "${root_cmd}" ]; then
-    run_with_tty "${root_cmd}" bash "${tmp_file}" "${reinstall_args[@]}"
+    run_with_tty "${root_cmd}" bash "${tmp_file}" "${reinstall_args[@]}" || reinstall_rc=$?
   else
-    run_with_tty bash "${tmp_file}" "${reinstall_args[@]}"
+    run_with_tty bash "${tmp_file}" "${reinstall_args[@]}" || reinstall_rc=$?
+  fi
+  if [ "${reinstall_rc}" -ne 0 ]; then
+    err "DD 重装脚本执行失败（退出码 ${reinstall_rc}），不会自动重启。"
+    return "${reinstall_rc}"
+  fi
+
+  printf '\n'
+  warn "DD 重装引导已准备完成。"
+  prompt_read -p "按回车重启系统并开始 DD（输入 n 取消）: " reboot_choice
+  case "${reboot_choice}" in
+    n|N)
+      warn "已取消重启，DD 引导仍保留；可稍后手动重启继续。"
+      return 0
+      ;;
+  esac
+  warn "正在重启系统，当前 SSH 会话将断开..."
+  if [ -n "${root_cmd}" ]; then
+    ${root_cmd} reboot
+  else
+    reboot
   fi
 }
 
@@ -4220,12 +4242,12 @@ dd_reinstall_menu_loop() {
     prompt_read -p "请输入你的选择 [2]: " choice
     printf '\n'
     case "${choice:-2}" in
-      1) run_dd_reinstall_system "debian" "12" ;;
-      2) run_dd_reinstall_system "debian" "13" ;;
-      3) run_dd_reinstall_system "ubuntu" "22.04" ;;
-      4) run_dd_reinstall_system "ubuntu" "24.04" ;;
-      5) run_dd_reinstall_system "windows" "10" ;;
-      6) run_dd_reinstall_system "windows" "11" ;;
+      1) run_dd_reinstall_system "debian" "12"; continue ;;
+      2) run_dd_reinstall_system "debian" "13"; continue ;;
+      3) run_dd_reinstall_system "ubuntu" "22.04"; continue ;;
+      4) run_dd_reinstall_system "ubuntu" "24.04"; continue ;;
+      5) run_dd_reinstall_system "windows" "10"; continue ;;
+      6) run_dd_reinstall_system "windows" "11"; continue ;;
       0) return 0 ;;
       *) warn "无效选项，请重新输入。" ;;
     esac

@@ -6,7 +6,7 @@ TaoBox 是一个面向 VPS 的一体化命令行工具箱，入口脚本会安�
 
 ## 当前版本
 
-- TaoBox VPS Toolbox：`v0.16.7`
+- TaoBox VPS Toolbox：`v0.16.8`
 - TaoBox Speed：`v1.0.0-taobox.6`
 - 默认安装路径：`~/ssh-key-menu.sh`
 - 默认快捷命令：`f`
@@ -241,6 +241,8 @@ Windows 10 通过 `bin456789/reinstall` 写入以下 LTSC 镜像，镜像内置�
 `administrator` / `Teddysun.com`，菜单不会再额外询问无效密码。Windows 11 使用同一新版安装器，
 会在本地磁盘空间不足时提前提示。纯 IPv6 VPS 还必须能访问 DD 镜像站；如果镜像域名没有
 AAAA 记录，需要先配置可用的 IPv6 出站或更换 IPv6 可达镜像。
+
+DD 引导配置完成后，按回车会重启服务器并开始 DD；输入 `n` 可取消本次重启并保留已写入的 DD 引导项。
 
 > DD 重装属于危险操作，请确认服务商支持、备份数据并确保你知道 root 密码。
 
